@@ -20,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use self::conn::{Conn, MessageHandler, MessageHandlerFactory, Seed, Key};
 
 mod buffer;
-pub mod channel;
+//pub mod channel;
 mod conn;
 mod h1;
 //mod h2;
@@ -202,6 +202,7 @@ mod internal {
         fn write_atomic(&mut self, data: &[&[u8]]) -> io::Result<usize>;
     }
 
+    /*
     #[cfg(not(windows))]
     impl<T: Write + ::vecio::Writev> AtomicWrite for T {
 
@@ -212,6 +213,7 @@ mod internal {
     }
 
     #[cfg(windows)]
+    */
     impl<T: Write> AtomicWrite for T {
         fn write_atomic(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
             let vec = bufs.concat();
@@ -371,9 +373,10 @@ enum Reg {
 /// A notifier to wakeup a socket after having used `Next::wait()`
 #[derive(Debug, Clone)]
 pub struct Control {
-    tx: self::channel::Sender<Next>,
+    //tx: self::channel::Sender<Next>,
 }
 
+/*
 impl Control {
     /// Wakeup a waiting socket to listen for a certain event.
     pub fn ready(&self, next: Next) -> Result<(), ControlError> {
@@ -381,6 +384,7 @@ impl Control {
         self.tx.send(next).map_err(|_| ControlError(()))
     }
 }
+*/
 
 /// An error occured trying to tell a Control it is ready.
 #[derive(Debug)]

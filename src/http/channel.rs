@@ -1,11 +1,11 @@
 use std::fmt;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use ::rotor;
 
 pub use std::sync::mpsc::TryRecvError;
 
-pub fn new<T>(notify: rotor::Notifier) -> (Sender<T>, Receiver<T>) {
+pub fn new<T>(notify: () /*rotor::Notifier*/) -> (Sender<T>, Receiver<T>) {
+    /*
     let b = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     (Sender {
@@ -17,6 +17,8 @@ pub fn new<T>(notify: rotor::Notifier) -> (Sender<T>, Receiver<T>) {
         awake: b,
         rx: rx,
     })
+    */
+    unimplemented!()
 }
 
 pub fn share<T, U>(other: &Sender<U>) -> (Sender<T>, Receiver<T>) {
@@ -36,7 +38,7 @@ pub fn share<T, U>(other: &Sender<U>) -> (Sender<T>, Receiver<T>) {
 
 pub struct Sender<T> {
     awake: Arc<AtomicBool>,
-    notify: rotor::Notifier,
+    //notify: rotor::Notifier,
     tx: mpsc::Sender<T>,
 }
 
@@ -77,11 +79,13 @@ impl<T> From<mpsc::SendError<T>> for SendError<T> {
     }
 }
 
+/*
 impl<T> From<rotor::WakeupError> for SendError<T> {
     fn from(_e: rotor::WakeupError) -> SendError<T> {
         SendError(None)
     }
 }
+*/
 
 pub struct Receiver<T> {
     awake: Arc<AtomicBool>,

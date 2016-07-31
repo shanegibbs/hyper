@@ -6,10 +6,11 @@ use std::marker::PhantomData;
 use std::mem;
 use std::time::Duration;
 
-use rotor::{self, EventSet, PollOpt, Scope};
+//use rotor::{self, EventSet, PollOpt, Scope};
+use tokio::task::Tick;
 
 use http::{self, h1, Http1Message, Encoder, Decoder, Next, Next_, Reg, Control};
-use http::channel;
+//use http::channel;
 use http::internal::WriteBuf;
 use http::buffer::Buffer;
 use net::{Transport, Blocked};
@@ -32,7 +33,7 @@ pub struct Conn<K: Key, T: Transport, H: MessageHandler<T>>(Box<ConnInner<K, T, 
 /// semantics but avoiding many costly memcpy calls.
 struct ConnInner<K: Key, T: Transport, H: MessageHandler<T>> {
     buf: Buffer,
-    ctrl: (channel::Sender<Next>, channel::Receiver<Next>),
+    //ctrl: (channel::Sender<Next>, channel::Receiver<Next>),
     keep_alive_enabled: bool,
     key: K,
     state: State<H, T>,
@@ -54,7 +55,6 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> fmt::Debug for Conn<K, T, H> {
         self.0.fmt(f)
     }
 }
-
 
 impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
     /// Desired Register interest based on state of current connection.
@@ -146,7 +146,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
-    fn read<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut Scope<F>, state: State<H, T>) -> State<H, T> {
+    fn read<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut F, state: State<H, T>) -> State<H, T> {
          match state {
             State::Init { interest: Next_::Read, .. } => {
                 let head = match self.parse() {
@@ -165,7 +165,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                         return State::Closed;
                     }
                 };
-                let mut handler = match scope.create(Seed(&self.key, &self.ctrl.0)) {
+                let mut handler = match scope.create(Seed(&self.key/*, &self.ctrl.0*/)) {
                     Some(handler) => handler,
                     None => unreachable!()
                 };
@@ -288,7 +288,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 };
                 let mut s = State::Http1(http1);
                 if let Some(next) = next {
-                    s.update(next, &**scope);
+                    s.update(next, /*&***/scope);
                 }
                 trace!("Conn.on_readable State::Http1 completed, new state = State::{:?}", s);
 
@@ -310,13 +310,13 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
-    fn write<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut Scope<F>, mut state: State<H, T>) -> State<H, T> {
+    fn write<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut F, mut state: State<H, T>) -> State<H, T> {
         let next = match state {
             State::Init { interest: Next_::Write, .. } => {
                 // this is a Client request, which writes first, so pay
                 // attention to the version written here, which will adjust
                 // our internal state to Http1 or Http2
-                let mut handler = match scope.create(Seed(&self.key, &self.ctrl.0)) {
+                let mut handler = match scope.create(Seed(&self.key/*, &self.ctrl.0*/)) {
                     Some(handler) => handler,
                     None => {
                         trace!("could not create handler {:?}", self.key);
@@ -447,7 +447,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         };
 
         if let Some(next) = next {
-            state.update(next, &**scope);
+            state.update(next, /*&***/scope);
         }
         state
     }
@@ -470,7 +470,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         self.state.update(next, factory);
     }
 
-    fn on_readable<F>(&mut self, scope: &mut Scope<F>)
+    fn on_readable<F>(&mut self, scope: &mut F)
     where F: MessageHandlerFactory<K, T, Output=H> {
         trace!("on_readable -> {:?}", self.state);
         let state = mem::replace(&mut self.state, State::Closed);
@@ -478,7 +478,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         trace!("on_readable <- {:?}", self.state);
     }
 
-    fn on_writable<F>(&mut self, scope: &mut Scope<F>)
+    fn on_writable<F>(&mut self, scope: &mut F)
     where F: MessageHandlerFactory<K, T, Output=H> {
         trace!("on_writable -> {:?}", self.state);
         let state = mem::replace(&mut self.state, State::Closed);
@@ -497,10 +497,10 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
 }
 
 impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
-    pub fn new(key: K, transport: T, next: Next, notify: rotor::Notifier) -> Conn<K, T, H> {
+    pub fn new(key: K, transport: T, next: Next/*, notify: rotor::Notifier*/) -> Conn<K, T, H> {
         Conn(Box::new(ConnInner {
             buf: Buffer::new(),
-            ctrl: channel::new(notify),
+            //ctrl: channel::new(notify),
             keep_alive_enabled: true,
             key: key,
             state: State::Init {
@@ -516,10 +516,11 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         self
     }
 
-    pub fn ready<F>(mut self, events: EventSet, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
+    pub fn ready<F>(&mut self, scope: &mut F) -> io::Result<Tick> //Option<(Self, Option<Duration>)>
     where F: MessageHandlerFactory<K, T, Output=H> {
-        trace!("Conn::ready events='{:?}', blocked={:?}", events, self.0.transport.blocked());
+        trace!("Conn::ready blocked={:?}", self.0.transport.blocked());
 
+        /*
         if events.is_error() {
             match self.0.transport.take_socket_error() {
                 Ok(_) => {
@@ -529,6 +530,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
                 Err(e) => self.0.on_error(e.into(), &**scope)
             }
         }
+        */
 
         // if the user had an io interest, but the transport was blocked differently,
         // the event needs to be translated to what the user was actually expecting.
@@ -544,6 +546,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         // - hyper needs to translate that `readable` event back into a `write`,
         //   since that is actually what the Handler wants.
 
+        /*
         let events = if let Some(blocked) = self.0.transport.blocked() {
             let interest = self.0.interest();
             trace!("translating blocked={:?}, interest={:?}", blocked, interest);
@@ -556,20 +559,26 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         } else {
             events
         };
+        */
 
         let was_init = match self.0.state {
             State::Init { .. } => true,
             _ => false
         };
 
-        if events.is_readable() {
+        //if events.is_readable() {
             self.0.on_readable(scope);
-        }
+        //}
 
-        if events.is_writable() {
+        //if events.is_writable() {
             self.0.on_writable(scope);
-        }
+        //}
 
+        match self.0.register() {
+            Reg::Remove => Ok(Tick::Final),
+            _ => Ok(Tick::WouldBlock)
+        }
+        /*
         let events = match self.0.register() {
             Reg::Read => EventSet::readable(),
             Reg::Write => EventSet::writable(),
@@ -599,8 +608,10 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
                 None
             }
         }
+        */
     }
 
+    /*
     pub fn wakeup<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
     where F: MessageHandlerFactory<K, T, Output=H> {
         while let Ok(next) = self.0.ctrl.1.try_recv() {
@@ -616,6 +627,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         self.0.on_error(::Error::Timeout, &**scope);
         self.ready(EventSet::none(), scope)
     }
+    */
 
     fn on_remove(self) {
         self.0.on_remove()
@@ -625,11 +637,13 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         &self.0.key
     }
 
+    /*
     pub fn control(&self) -> Control {
         Control {
             tx: self.0.ctrl.0.clone(),
         }
     }
+    */
 
     pub fn is_idle(&self) -> bool {
         if let State::Init { interest: Next_::Wait, .. } = self.0.state {
@@ -943,14 +957,16 @@ pub trait MessageHandler<T: Transport> {
     fn on_remove(self, T) where Self: Sized;
 }
 
-pub struct Seed<'a, K: Key + 'a>(&'a K, &'a channel::Sender<Next>);
+pub struct Seed<'a, K: Key + 'a>(&'a K/*, &'a channel::Sender<Next>*/);
 
 impl<'a, K: Key + 'a> Seed<'a, K> {
+    /*
     pub fn control(&self) -> Control {
         Control {
             tx: self.1.clone(),
         }
     }
+    */
 
     pub fn key(&self) -> &K {
         self.0

@@ -1,7 +1,7 @@
 #![doc(html_root_url = "https://hyperium.github.io/hyper/")]
-#![deny(missing_docs)]
-#![deny(warnings)]
-#![deny(missing_debug_implementations)]
+#![allow(missing_docs)]
+#![allow(warnings)]
+#![allow(missing_debug_implementations)]
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 
 //! # Hyper
@@ -29,9 +29,10 @@ extern crate serde;
 extern crate cookie;
 extern crate unicase;
 extern crate httparse;
-extern crate rotor;
+extern crate tokio;
 extern crate spmc;
 extern crate vecio;
+extern crate mio;
 
 #[macro_use]
 extern crate language_tags;
@@ -47,7 +48,7 @@ extern crate test;
 
 
 pub use url::Url;
-pub use client::Client;
+//pub use client::Client;
 pub use error::{Result, Error};
 pub use header::Headers;
 pub use http::{Next, Encoder, Decoder, Control, ControlError};
@@ -58,23 +59,14 @@ pub use server::Server;
 pub use uri::RequestUri;
 pub use version::HttpVersion;
 
-macro_rules! rotor_try {
-    ($e:expr) => ({
-        match $e {
-            Ok(v) => v,
-            Err(e) => return ::rotor::Response::error(e.into())
-        }
-    });
-}
-
 #[cfg(test)]
 mod mock;
-pub mod client;
+//pub mod client;
 pub mod error;
 pub mod method;
 pub mod header;
 mod http;
-pub mod net;
+//pub mod net;
 pub mod server;
 pub mod status;
 pub mod uri;
@@ -83,6 +75,33 @@ pub mod version;
 /// Re-exporting the mime crate, for convenience.
 pub mod mime {
     pub use mime_crate::*;
+}
+
+pub mod net {
+    pub use tokio::tcp::{TcpStream as HttpStream};
+    use std::io::{Read, Write};
+    pub trait Transport: Read + Write {
+        fn blocked(&self) -> Option<Blocked> {
+            None
+        }
+    }
+    impl<T: Read + Write> Transport for T {}
+
+    #[derive(Debug)]
+    pub enum Blocked {
+        Read,
+        Write
+    }
+
+    pub trait Accept {
+        type Output: Transport;
+    }
+
+    impl<T> Accept for T {
+        type Output = ::tokio::tcp::TcpStream;
+    }
+
+    pub struct HttpListener(pub ::mio::tcp::TcpListener);
 }
 
 /*

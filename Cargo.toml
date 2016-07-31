@@ -16,10 +16,11 @@ httparse = "1.0"
 language-tags = "0.2"
 log = "0.3"
 mime = "0.2"
-rotor = "0.6"
+mio = {git = "https://github.com/carllerche/mio", branch = "dev"}
 rustc-serialize = "0.3"
 spmc = "0.2"
 time = "0.1"
+tokio = {path = "../tokio/tokio"}
 unicase = "1.0"
 url = "1.0"
 vecio = "0.1"

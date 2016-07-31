@@ -2,22 +2,28 @@
 //!
 //! A `Server` is created to listen on a port, parse HTTP requests, and hand
 //! them off to a `Handler`.
+use std::cell::RefCell;
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use rotor::mio::{EventSet, PollOpt};
-use rotor::{self, Scope};
+use tokio::task::{Task, Tick};
 
 pub use self::request::Request;
 pub use self::response::Response;
 
 use http::{self, Next};
 
+pub use net::{Accept, HttpListener};
+use net::{HttpStream, Transport};
+/*
 pub use net::{Accept, HttpListener, HttpsListener};
 use net::{SslServer, Transport};
+*/
 
 
 mod request;
@@ -26,7 +32,8 @@ mod message;
 
 /// A configured `Server` ready to run.
 pub struct ServerLoop<A, H> where A: Accept, H: HandlerFactory<A::Output> {
-    inner: Option<(rotor::Loop<ServerFsm<A, H>>, Context<H>)>,
+    inner: ::std::marker::PhantomData<(A, H)>
+    //inner: Option<(rotor::Loop<ServerFsm<A, H>>, Context<H>)>,
 }
 
 impl<A: Accept, H: HandlerFactory<A::Output>> fmt::Debug for ServerLoop<A, H> {
@@ -49,10 +56,15 @@ impl<A: Accept> Server<A> {
     /// Creates a new Server from one or more Listeners.
     ///
     /// Panics if listeners is an empty iterator.
+    pub fn new(listener: A) -> Server<A> {
+    /*
     pub fn new<I: IntoIterator<Item = A>>(listeners: I) -> Server<A> {
         let mut listeners = listeners.into_iter();
         let lead_listener = listeners.next().expect("Server::new requires at least 1 listener");
         let other_listeners = listeners.collect::<Vec<_>>();
+    */
+        let lead_listener = listener;
+        let other_listeners = Vec::new();
 
         Server {
             lead_listener: lead_listener,
@@ -91,8 +103,8 @@ impl<A: Accept> Server<A> {
 impl Server<HttpListener> { //<H: HandlerFactory<<HttpListener as Accept>::Output>> Server<HttpListener, H> {
     /// Creates a new HTTP server config listening on the provided address.
     pub fn http(addr: &SocketAddr) -> ::Result<Server<HttpListener>> {
-        use ::rotor::mio::tcp::TcpListener;
-        TcpListener::bind(addr)
+        use ::mio;
+        mio::tcp::TcpListener::bind(addr)
             .map(HttpListener)
             .map(Server::new)
             .map_err(From::from)
@@ -100,6 +112,7 @@ impl Server<HttpListener> { //<H: HandlerFactory<<HttpListener as Accept>::Outpu
 }
 
 
+/*
 impl<S: SslServer> Server<HttpsListener<S>> {
     /// Creates a new server config that will handle `HttpStream`s over SSL.
     ///
@@ -110,12 +123,49 @@ impl<S: SslServer> Server<HttpsListener<S>> {
             .map_err(From::from)
     }
 }
+*/
 
 
-impl<A: Accept> Server<A> {
+impl/*<A: Accept>*/ Server<HttpListener> {
     /// Binds to a socket and starts handling connections.
-    pub fn handle<H>(self, factory: H) -> ::Result<(Listening, ServerLoop<A, H>)>
-    where H: HandlerFactory<A::Output> {
+    pub fn handle<H>(self, factory: H) -> ::Result<(Listening, ServerLoop<HttpListener, H>)>
+    where H: HandlerFactory<HttpStream/*A::Output*/> + Send + 'static {
+        use std::rc::Rc;
+        use std::cell::RefCell;
+        use tokio::reactor::{self, Reactor};
+        use tokio::task::Tick;
+        let reactor = try!(Reactor::default());
+
+        let handle = reactor.handle();
+        handle.oneshot(move || {
+            let listener = ::tokio::tcp::TcpListener::watch(self.lead_listener.0).unwrap();
+            let keep_alive = self.keep_alive;
+            let idle_timeout = self.idle_timeout;
+
+            let factory = Rc::new(RefCell::new(Context {
+                factory: factory,
+                idle_timeout: idle_timeout,
+                keep_alive: keep_alive
+            }));
+
+            reactor::schedule(move || {
+                while let Some(socket) = try!(listener.accept()) {
+                    let socket = try!(::tokio::tcp::TcpStream::watch(socket));
+                    let conn = http::Conn::new((), socket, Next::read());
+                    let conn = Conn {
+                        inner: conn,
+                        factory: factory.clone(),
+                    };
+                    reactor::schedule(conn);
+                }
+
+                Ok(Tick::WouldBlock)
+            });
+        });
+
+        reactor.run();
+        unimplemented!()
+        /*
         let shutdown = Arc::new(AtomicBool::new(false));
         
         let mut config = rotor::Config::new();
@@ -164,6 +214,7 @@ impl<A: Accept> Server<A> {
             }))
         };
         Ok((listening, server))
+        */
     }
 }
 
@@ -179,9 +230,11 @@ impl<A: Accept, H: HandlerFactory<A::Output>> ServerLoop<A, H> {
 
 impl<A: Accept, H: HandlerFactory<A::Output>> Drop for ServerLoop<A, H> {
     fn drop(&mut self) {
+        /*
         self.inner.take().map(|(loop_, ctx)| {
             let _ = loop_.run(ctx);
         });
+        */
     }
 }
 
@@ -195,7 +248,7 @@ impl<F: HandlerFactory<T>, T: Transport> http::MessageHandlerFactory<(), T> for 
     type Output = message::Message<F::Output, T>;
 
     fn create(&mut self, seed: http::Seed<()>) -> Option<Self::Output> {
-        Some(message::Message::new(self.factory.create(seed.control())))
+        Some(message::Message::new(self.factory.create(/*seed.control()*/)))
     }
 
     fn keep_alive_interest(&self) -> Next {
@@ -207,6 +260,7 @@ impl<F: HandlerFactory<T>, T: Transport> http::MessageHandlerFactory<(), T> for 
     }
 }
 
+/*
 enum ServerFsm<A, H>
 where A: Accept,
       A::Output: Transport,
@@ -319,10 +373,25 @@ where A: Accept,
     }
 }
 
+*/
+struct Conn<T, F> where T: Transport, F: HandlerFactory<T> {
+    inner: http::Conn<(), T, message::Message<F::Output, T>>,
+    factory: Rc<RefCell<Context<F>>>,
+}
+
+impl<T, F> Task for Conn<T, F>
+where T: Transport,
+      F: HandlerFactory<T> {
+    fn tick(&mut self) -> io::Result<Tick> {
+        let mut factory = self.factory.borrow_mut();
+        self.inner.ready(&mut *factory)
+    }
+}
+
 /// A handle of the running server.
 pub struct Listening {
     addrs: Vec<SocketAddr>,
-    shutdown: (Arc<AtomicBool>, rotor::Notifier),
+    shutdown: (Arc<AtomicBool>, /*rotor::Notifier*/),
 }
 
 impl fmt::Debug for Listening {
@@ -356,7 +425,7 @@ impl Listening {
     pub fn close(self) {
         debug!("closing server {}", self);
         self.shutdown.0.store(true, Ordering::Release);
-        self.shutdown.1.wakeup().unwrap();
+        //self.shutdown.1.wakeup().unwrap();
     }
 }
 
@@ -393,13 +462,13 @@ pub trait HandlerFactory<T: Transport> {
     /// The `Handler` to use for the incoming message.
     type Output: Handler<T>;
     /// Creates the associated `Handler`.
-    fn create(&mut self, ctrl: http::Control) -> Self::Output;
+    fn create(&mut self/*, ctrl: http::Control*/) -> Self::Output;
 }
 
 impl<F, H, T> HandlerFactory<T> for F
-where F: FnMut(http::Control) -> H, H: Handler<T>, T: Transport {
+where F: FnMut(/*http::Control*/) -> H, H: Handler<T>, T: Transport {
     type Output = H;
-    fn create(&mut self, ctrl: http::Control) -> H {
-        self(ctrl)
+    fn create(&mut self, /*ctrl: http::Control*/) -> H {
+        self(/*ctrl*/)
     }
 }

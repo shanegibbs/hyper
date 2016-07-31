@@ -4,7 +4,7 @@ extern crate env_logger;
 extern crate num_cpus;
 
 use hyper::{Decoder, Encoder, Next, HttpStream};
-use hyper::server::{Server, Handler, Request, Response, HttpListener};
+use hyper::server::{Server, Handler, Request, Response/*, HttpListener*/};
 
 static PHRASE: &'static [u8] = b"Hello World!";
 
@@ -31,7 +31,12 @@ impl Handler<HttpStream> for Hello {
 
 fn main() {
     env_logger::init().unwrap();
- 
+
+    println!("Listening on http://127.0.0.1:3000");
+    Server::http(&"127.0.0.1:3000".parse().unwrap()).unwrap()
+        .handle(|| Hello).unwrap();
+
+    /*
     let listener = HttpListener::bind(&"127.0.0.1:3000".parse().unwrap()).unwrap();
     let mut handles = Vec::new();
 
@@ -39,7 +44,7 @@ fn main() {
         let listener = listener.try_clone().unwrap();
         handles.push(::std::thread::spawn(move || {
             Server::new(listener)
-                .handle(|_| Hello).unwrap();
+                .handle(|| Hello).unwrap();
         }));
     }
     println!("Listening on http://127.0.0.1:3000");
@@ -47,4 +52,5 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
+    */
 }
