@@ -28,7 +28,7 @@ use net::{SslServer, Transport};
 
 mod request;
 mod response;
-mod message;
+mod transaction;
 
 /// A configured `Server` ready to run.
 pub struct ServerLoop<A, H> where A: Accept, H: HandlerFactory<A::Output> {
@@ -151,10 +151,9 @@ impl/*<A: Accept>*/ Server<HttpListener> {
             reactor::schedule(move || {
                 while let Some(socket) = try!(listener.accept()) {
                     let socket = try!(::tokio::tcp::TcpStream::watch(socket));
-                    let conn = http::Conn::new((), socket, Next::read());
+                    let conn = http::Conn::new((), socket, ConstFactory(factory.clone()), Next::read());
                     let conn = Conn {
                         inner: conn,
-                        factory: factory.clone(),
                     };
                     reactor::schedule(conn);
                 }
@@ -165,56 +164,6 @@ impl/*<A: Accept>*/ Server<HttpListener> {
 
         reactor.run();
         unimplemented!()
-        /*
-        let shutdown = Arc::new(AtomicBool::new(false));
-        
-        let mut config = rotor::Config::new();
-        config.slab_capacity(self.max_sockets);
-        config.mio().notify_capacity(self.max_sockets);
-        let keep_alive = self.keep_alive;
-        let idle_timeout = self.idle_timeout;
-        let mut loop_ = rotor::Loop::new(&config).unwrap();
-
-        let mut addrs = Vec::with_capacity(1 + self.other_listeners.len());
-
-        // Add the lead listener. This one handles shutdown messages.
-        let mut notifier = None;
-        {
-            let notifier = &mut notifier;
-            let listener = self.lead_listener;
-            addrs.push(try!(listener.local_addr()));
-            let shutdown_rx = shutdown.clone();
-            loop_.add_machine_with(move |scope| {
-                *notifier = Some(scope.notifier());
-                rotor_try!(scope.register(&listener, EventSet::readable(), PollOpt::level()));
-                rotor::Response::ok(ServerFsm::Listener(listener, shutdown_rx))
-            }).unwrap();
-        }
-        let notifier = notifier.expect("loop.add_machine failed");
-
-        // Add the other listeners.
-        for listener in self.other_listeners {
-            addrs.push(try!(listener.local_addr()));
-            let shutdown_rx = shutdown.clone();
-            loop_.add_machine_with(move |scope| {
-                rotor_try!(scope.register(&listener, EventSet::readable(), PollOpt::level()));
-                rotor::Response::ok(ServerFsm::Listener(listener, shutdown_rx))
-            }).unwrap();
-        }
-
-        let listening = Listening {
-            addrs: addrs,
-            shutdown: (shutdown, notifier),
-        };
-        let server = ServerLoop {
-            inner: Some((loop_, Context {
-                factory: factory,
-                idle_timeout: idle_timeout,
-                keep_alive: keep_alive,
-            }))
-        };
-        Ok((listening, server))
-        */
     }
 }
 
@@ -244,15 +193,17 @@ struct Context<F> {
     keep_alive: bool,
 }
 
-impl<F: HandlerFactory<T>, T: Transport> http::MessageHandlerFactory<(), T> for Context<F> {
-    type Output = message::Message<F::Output, T>;
+struct ConstFactory<F>(Rc<RefCell<Context<F>>>);
 
-    fn create(&mut self, seed: http::Seed<()>) -> Option<Self::Output> {
-        Some(message::Message::new(self.factory.create(/*seed.control()*/)))
+impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFactory<F> {
+    type Txn = transaction::Transaction<F::Output, T>;
+
+    fn transaction(&mut self) -> Option<Self::Txn> {
+        Some(transaction::Transaction::new(self.0.borrow_mut().factory.create()))
     }
 
     fn keep_alive_interest(&self) -> Next {
-        if let Some(dur) = self.idle_timeout {
+        if let Some(dur) = self.0.borrow().idle_timeout {
             Next::read().timeout(dur)
         } else {
             Next::read()
@@ -260,131 +211,16 @@ impl<F: HandlerFactory<T>, T: Transport> http::MessageHandlerFactory<(), T> for 
     }
 }
 
-/*
-enum ServerFsm<A, H>
-where A: Accept,
-      A::Output: Transport,
-      H: HandlerFactory<A::Output> {
-    Listener(A, Arc<AtomicBool>),
-    Conn(http::Conn<(), A::Output, message::Message<H::Output, A::Output>>)
-}
 
-impl<A, H> rotor::Machine for ServerFsm<A, H>
-where A: Accept,
-      A::Output: Transport,
-      H: HandlerFactory<A::Output> {
-    type Context = Context<H>;
-    type Seed = A::Output;
-
-    fn create(seed: Self::Seed, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, rotor::Void> {
-        rotor_try!(scope.register(&seed, EventSet::readable(), PollOpt::level()));
-        rotor::Response::ok(
-            ServerFsm::Conn(
-                http::Conn::new((), seed, Next::read(), scope.notifier())
-                    .keep_alive(scope.keep_alive)
-            )
-        )
-    }
-
-    fn ready(self, events: EventSet, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
-        match self {
-            ServerFsm::Listener(listener, rx) => {
-                match listener.accept() {
-                    Ok(Some(conn)) => {
-                        rotor::Response::spawn(ServerFsm::Listener(listener, rx), conn)
-                    },
-                    Ok(None) => rotor::Response::ok(ServerFsm::Listener(listener, rx)),
-                    Err(e) => {
-                        error!("listener accept error {}", e);
-                        // usually fine, just keep listening
-                        rotor::Response::ok(ServerFsm::Listener(listener, rx))
-                    }
-                }
-            },
-            ServerFsm::Conn(conn) => {
-                match conn.ready(events, scope) {
-                    Some((conn, None)) => rotor::Response::ok(ServerFsm::Conn(conn)),
-                    Some((conn, Some(dur))) => {
-                        rotor::Response::ok(ServerFsm::Conn(conn))
-                            .deadline(scope.now() + dur)
-                    }
-                    None => rotor::Response::done()
-                }
-            }
-        }
-    }
-
-    fn spawned(self, _scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
-        match self {
-            ServerFsm::Listener(listener, rx) => {
-                match listener.accept() {
-                    Ok(Some(conn)) => {
-                        rotor::Response::spawn(ServerFsm::Listener(listener, rx), conn)
-                    },
-                    Ok(None) => rotor::Response::ok(ServerFsm::Listener(listener, rx)),
-                    Err(e) => {
-                        error!("listener accept error {}", e);
-                        // usually fine, just keep listening
-                        rotor::Response::ok(ServerFsm::Listener(listener, rx))
-                    }
-                }
-            },
-            sock => rotor::Response::ok(sock)
-        }
-
-    }
-
-    fn timeout(self, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
-        match self {
-            ServerFsm::Listener(..) => unreachable!("Listener cannot timeout"),
-            ServerFsm::Conn(conn) => {
-                match conn.timeout(scope) {
-                    Some((conn, None)) => rotor::Response::ok(ServerFsm::Conn(conn)),
-                    Some((conn, Some(dur))) => {
-                        rotor::Response::ok(ServerFsm::Conn(conn))
-                            .deadline(scope.now() + dur)
-                    }
-                    None => rotor::Response::done()
-                }
-            }
-        }
-    }
-
-    fn wakeup(self, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
-        match self {
-            ServerFsm::Listener(lst, shutdown) => {
-                if shutdown.load(Ordering::Acquire) {
-                    let _ = scope.deregister(&lst);
-                    scope.shutdown_loop();
-                    rotor::Response::done()
-                } else {
-                    rotor::Response::ok(ServerFsm::Listener(lst, shutdown))
-                }
-            },
-            ServerFsm::Conn(conn) => match conn.wakeup(scope) {
-                Some((conn, None)) => rotor::Response::ok(ServerFsm::Conn(conn)),
-                Some((conn, Some(dur))) => {
-                    rotor::Response::ok(ServerFsm::Conn(conn))
-                        .deadline(scope.now() + dur)
-                }
-                None => rotor::Response::done()
-            }
-        }
-    }
-}
-
-*/
 struct Conn<T, F> where T: Transport, F: HandlerFactory<T> {
-    inner: http::Conn<(), T, message::Message<F::Output, T>>,
-    factory: Rc<RefCell<Context<F>>>,
+    inner: http::Conn<(), T, ConstFactory<F>> //transaction::Transaction<F::Output, T>>,
 }
 
 impl<T, F> Task for Conn<T, F>
 where T: Transport,
       F: HandlerFactory<T> {
     fn tick(&mut self) -> io::Result<Tick> {
-        let mut factory = self.factory.borrow_mut();
-        self.inner.ready(&mut *factory)
+        self.inner.ready()
     }
 }
 
@@ -429,7 +265,7 @@ impl Listening {
     }
 }
 
-/// A trait to react to server events that happen for each message.
+/// A trait to react to server events that happen for each transaction.
 ///
 /// Each event handler returns its desired `Next` action.
 pub trait Handler<T: Transport> {
@@ -457,9 +293,9 @@ pub trait Handler<T: Transport> {
 }
 
 
-/// Used to create a `Handler` when a new message is received by the server.
+/// Used to create a `Handler` when a new transaction is received by the server.
 pub trait HandlerFactory<T: Transport> {
-    /// The `Handler` to use for the incoming message.
+    /// The `Handler` to use for the incoming transaction.
     type Output: Handler<T>;
     /// Creates the associated `Handler`.
     fn create(&mut self/*, ctrl: http::Control*/) -> Self::Output;

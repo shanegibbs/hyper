@@ -6,27 +6,27 @@ use net::Transport;
 
 use super::{Handler, request, response};
 
-/// A `MessageHandler` for a Server.
+/// A `TransactionHandler` for a Server.
 ///
-/// This should be really thin glue between `http::MessageHandler` and
+/// This should be really thin glue between `http::TransactionHandler` and
 /// `server::Handler`, but largely just providing the proper types one
 /// would expect in a Server Handler.
-pub struct Message<H: Handler<T>, T: Transport> {
+pub struct Transaction<H: Handler<T>, T: Transport> {
     handler: H,
     _marker: PhantomData<T>
 }
 
-impl<H: Handler<T>, T: Transport> Message<H, T> {
-    pub fn new(handler: H) -> Message<H, T> {
-        Message {
+impl<H: Handler<T>, T: Transport> Transaction<H, T> {
+    pub fn new(handler: H) -> Transaction<H, T> {
+        Transaction {
             handler: handler,
             _marker: PhantomData,
         }
     }
 }
 
-impl<H: Handler<T>, T: Transport> http::MessageHandler<T> for Message<H, T> {
-    type Message = http::ServerMessage;
+impl<H: Handler<T>, T: Transport> http::TransactionHandler<T> for Transaction<H, T> {
+    type Transaction = http::ServerTransaction;
 
     fn on_incoming(&mut self, head: http::RequestHead, transport: &T) -> Next {
         trace!("on_incoming {:?}", head);

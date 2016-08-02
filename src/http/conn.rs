@@ -9,7 +9,7 @@ use std::time::Duration;
 //use rotor::{self, EventSet, PollOpt, Scope};
 use tokio::task::Tick;
 
-use http::{self, h1, Http1Message, Encoder, Decoder, Next, Next_, Reg, Control};
+use http::{self, h1, Http1Transaction, Encoder, Decoder, Next, Next_, Reg, Control};
 //use http::channel;
 use http::internal::WriteBuf;
 use http::buffer::Buffer;
@@ -20,27 +20,21 @@ const MAX_BUFFER_SIZE: usize = 8192 + 4096 * 100;
 
 /// This handles a connection, which will have been established over a
 /// Transport (like a socket), and will likely include multiple
-/// `Message`s over HTTP.
+/// `Transaction`s over HTTP.
 ///
 /// The connection will determine when a message begins and ends, creating
-/// a new message `MessageHandler` for each one, as well as determine if this
+/// a new message `TransactionHandler` for each one, as well as determine if this
 /// connection can be kept alive after the message, or if it is complete.
-pub struct Conn<K: Key, T: Transport, H: MessageHandler<T>>(Box<ConnInner<K, T, H>>);
-
-
-/// `ConnInner` contains all of a connections state which Conn proxies for in a way
-/// that allows Conn to maintain convenient move and self consuming method call
-/// semantics but avoiding many costly memcpy calls.
-struct ConnInner<K: Key, T: Transport, H: MessageHandler<T>> {
+pub struct Conn<K: Key, T: Transport, H: ConnectionHandler<T>> {
     buf: Buffer,
-    //ctrl: (channel::Sender<Next>, channel::Receiver<Next>),
+    handler: H,
     keep_alive_enabled: bool,
     key: K,
-    state: State<H, T>,
+    state: State<H::Txn, T>,
     transport: T,
 }
 
-impl<K: Key, T: Transport, H: MessageHandler<T>> fmt::Debug for ConnInner<K, T, H> {
+impl<K: Key, T: Transport, H: ConnectionHandler<T>> fmt::Debug for Conn<K, T, H> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Conn")
             .field("keep_alive_enabled", &self.keep_alive_enabled)
@@ -50,13 +44,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> fmt::Debug for ConnInner<K, T, 
     }
 }
 
-impl<K: Key, T: Transport, H: MessageHandler<T>> fmt::Debug for Conn<K, T, H> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
+impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
     /// Desired Register interest based on state of current connection.
     ///
     /// This includes the user interest, such as when they return `Next::read()`.
@@ -116,6 +104,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
+<<<<<<< HEAD
     fn parse(&mut self) -> ::Result<http::MessageHead<<<H as MessageHandler<T>>::Message as Http1Message>::Incoming>> {
         match self.buf.read_from(&mut self.transport) {
             Ok(0) => {
@@ -127,8 +116,15 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 io::ErrorKind::WouldBlock => {},
                 _ => return Err(e.into())
             }
+=======
+    fn parse(&mut self) -> ::Result<http::MessageHead<<<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction as Http1Transaction>::Incoming>> {
+        let n = try!(self.buf.read_from(&mut self.transport));
+        if n == 0 {
+            trace!("parse eof");
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "parse eof").into());
+>>>>>>> connection handler
         }
-        match try!(http::parse::<<H as MessageHandler<T>>::Message, _>(self.buf.bytes())) {
+        match try!(http::parse::<<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction, _>(self.buf.bytes())) {
             Some((head, len)) => {
                 trace!("parsed {} bytes out of {}", len, self.buf.len());
                 self.buf.consume(len);
@@ -146,7 +142,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
-    fn read<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut F, state: State<H, T>) -> State<H, T> {
+    fn read(&mut self, state: State<H::Txn, T>) -> State<H::Txn, T> {
          match state {
             State::Init { interest: Next_::Read, .. } => {
                 let head = match self.parse() {
@@ -165,11 +161,11 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                         return State::Closed;
                     }
                 };
-                let mut handler = match scope.create(Seed(&self.key/*, &self.ctrl.0*/)) {
+                let mut handler = match self.handler.transaction() {
                     Some(handler) => handler,
                     None => unreachable!()
                 };
-                match H::Message::decoder(&head) {
+                match <<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction::decoder(&head) {
                     Ok(decoder) => {
                         trace!("decoder = {:?}", decoder);
                         let keep_alive = self.keep_alive_enabled && head.should_keep_alive();
@@ -177,7 +173,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                         trace!("handler.on_incoming() -> {:?}", next);
 
                         match next.interest {
-                            Next_::Read => self.read(scope, State::Http1(Http1 {
+                            Next_::Read => self.read(State::Http1(Http1 {
                                 handler: handler,
                                 reading: Reading::Body(decoder),
                                 writing: Writing::Init,
@@ -201,7 +197,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                                 timeout: next.timeout,
                                 _marker: PhantomData,
                             }),
-                            Next_::ReadWrite => self.read(scope, State::Http1(Http1 {
+                            Next_::ReadWrite => self.read(State::Http1(Http1 {
                                 handler: handler,
                                 reading: Reading::Body(decoder),
                                 writing: Writing::Head,
@@ -239,7 +235,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 let next = match http1.reading {
                     Reading::Init => None,
                     Reading::Parse => match self.parse() {
-                        Ok(head) => match H::Message::decoder(&head) {
+                        Ok(head) => match <<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction::decoder(&head) {
                             Ok(decoder) => {
                                 trace!("decoder = {:?}", decoder);
                                 // if client request asked for keep alive,
@@ -288,7 +284,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 };
                 let mut s = State::Http1(http1);
                 if let Some(next) = next {
-                    s.update(next, /*&***/scope);
+                    s.update(next);
                 }
                 trace!("Conn.on_readable State::Http1 completed, new state = State::{:?}", s);
 
@@ -298,7 +294,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 };
 
                 if again {
-                    self.read(scope, s)
+                    self.read(s)
                 } else {
                     s
                 }
@@ -310,13 +306,13 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
-    fn write<F: MessageHandlerFactory<K, T, Output=H>>(&mut self, scope: &mut F, mut state: State<H, T>) -> State<H, T> {
+    fn write(&mut self, mut state: State<H::Txn, T>) -> State<H::Txn, T> {
         let next = match state {
             State::Init { interest: Next_::Write, .. } => {
                 // this is a Client request, which writes first, so pay
                 // attention to the version written here, which will adjust
                 // our internal state to Http1 or Http2
-                let mut handler = match scope.create(Seed(&self.key/*, &self.ctrl.0*/)) {
+                let mut handler = match self.handler.transaction() {
                     Some(handler) => handler,
                     None => {
                         trace!("could not create handler {:?}", self.key);
@@ -328,7 +324,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                 if head.version == HttpVersion::Http11 {
                     let mut buf = Vec::new();
                     let keep_alive = self.keep_alive_enabled && head.should_keep_alive();
-                    let mut encoder = H::Message::encode(head, &mut buf);
+                    let mut encoder = <<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction as Http1Transaction>::encode(head, &mut buf);
                     let writing = match interest.interest {
                         // user wants to write some data right away
                         // try to write the headers and the first chunk
@@ -379,7 +375,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                             *keep_alive = head.should_keep_alive();
                         }
                         let mut buf = Vec::new();
-                        let mut encoder = <<H as MessageHandler<T>>::Message as Http1Message>::encode(head, &mut buf);
+                        let mut encoder = <<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction as Http1Transaction>::encode(head, &mut buf);
                         *writing = match interest.interest {
                             // user wants to write some data right away
                             // try to write the headers and the first chunk
@@ -447,7 +443,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         };
 
         if let Some(next) = next {
-            state.update(next, /*&***/scope);
+            state.update(next);
         }
         state
     }
@@ -459,7 +455,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
         }
     }
 
-    fn on_error<F>(&mut self, err: ::Error, factory: &F) where F: MessageHandlerFactory<K, T> {
+    fn on_error(&mut self, err: ::Error) {
         debug!("on_error err = {:?}", err);
         trace!("on_error state = {:?}", self.state);
         let next = match self.state {
@@ -467,22 +463,20 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
             State::Http1(ref mut http1) => http1.handler.on_error(err),
             State::Closed => Next::remove(),
         };
-        self.state.update(next, factory);
+        self.state.update(next);
     }
 
-    fn on_readable<F>(&mut self, scope: &mut F)
-    where F: MessageHandlerFactory<K, T, Output=H> {
+    fn on_readable(&mut self) {
         trace!("on_readable -> {:?}", self.state);
         let state = mem::replace(&mut self.state, State::Closed);
-        self.state = self.read(scope, state);
+        self.state = self.read(state);
         trace!("on_readable <- {:?}", self.state);
     }
 
-    fn on_writable<F>(&mut self, scope: &mut F)
-    where F: MessageHandlerFactory<K, T, Output=H> {
+    fn on_writable(&mut self) {
         trace!("on_writable -> {:?}", self.state);
         let state = mem::replace(&mut self.state, State::Closed);
-        self.state = self.write(scope, state);
+        self.state = self.write(state);
         trace!("on_writable <- {:?}", self.state);
     }
 
@@ -496,11 +490,11 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
 
 }
 
-impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
-    pub fn new(key: K, transport: T, next: Next/*, notify: rotor::Notifier*/) -> Conn<K, T, H> {
-        Conn(Box::new(ConnInner {
+impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
+    pub fn new(key: K, transport: T, handler: H, next: Next) -> Conn<K, T, H> {
+        Conn {
             buf: Buffer::new(),
-            //ctrl: channel::new(notify),
+            handler: handler,
             keep_alive_enabled: true,
             key: key,
             state: State::Init {
@@ -508,26 +502,25 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
                 timeout: next.timeout,
             },
             transport: transport,
-        }))
+        }
     }
 
     pub fn keep_alive(mut self, val: bool) -> Conn<K, T, H> {
-        self.0.keep_alive_enabled = val;
+        self.keep_alive_enabled = val;
         self
     }
 
-    pub fn ready<F>(&mut self, scope: &mut F) -> io::Result<Tick> //Option<(Self, Option<Duration>)>
-    where F: MessageHandlerFactory<K, T, Output=H> {
-        trace!("Conn::ready blocked={:?}", self.0.transport.blocked());
+    pub fn ready(&mut self) -> io::Result<Tick> {
+        trace!("Conn::ready blocked={:?}", self.transport.blocked());
 
         /*
         if events.is_error() {
-            match self.0.transport.take_socket_error() {
+            match self.transport.take_socket_error() {
                 Ok(_) => {
                     trace!("is_error, but not socket error");
                     // spurious?
                 },
-                Err(e) => self.0.on_error(e.into(), &**scope)
+                Err(e) => self.on_error(e.into(), &**scope)
             }
         }
         */
@@ -547,8 +540,8 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         //   since that is actually what the Handler wants.
 
         /*
-        let events = if let Some(blocked) = self.0.transport.blocked() {
-            let interest = self.0.interest();
+        let events = if let Some(blocked) = self.transport.blocked() {
+            let interest = self.interest();
             trace!("translating blocked={:?}, interest={:?}", blocked, interest);
             match (blocked, interest) {
                 (Blocked::Read, Reg::Write) => EventSet::writable(),
@@ -567,44 +560,50 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         };
 
         //if events.is_readable() {
-            self.0.on_readable(scope);
+            self.on_readable();
         //}
 
         //if events.is_writable() {
-            self.0.on_writable(scope);
+            self.on_writable();
         //}
 
-        match self.0.register() {
+        match self.register() {
             Reg::Remove => Ok(Tick::Final),
-            _ => Ok(Tick::WouldBlock)
+            _ => {
+                if self.can_read_more(was_init) {
+                    self.ready()
+                } else {
+                    Ok(Tick::WouldBlock)
+                }
+            }
         }
         /*
-        let events = match self.0.register() {
+        let events = match self.register() {
             Reg::Read => EventSet::readable(),
             Reg::Write => EventSet::writable(),
             Reg::ReadWrite => EventSet::readable() | EventSet::writable(),
             Reg::Wait => EventSet::none(),
             Reg::Remove => {
                 trace!("removing transport");
-                let _ = scope.deregister(&self.0.transport);
+                let _ = scope.deregister(&self.transport);
                 self.on_remove();
                 return None;
             },
         };
 
-        if events.is_readable() && self.0.can_read_more(was_init) {
+        if events.is_readable() && self.can_read_more(was_init) {
             return self.ready(events, scope);
         }
 
         trace!("scope.reregister({:?})", events);
-        match scope.reregister(&self.0.transport, events, PollOpt::level()) {
+        match scope.reregister(&self.transport, events, PollOpt::level()) {
             Ok(..) => {
-                let timeout = self.0.state.timeout();
+                let timeout = self.state.timeout();
                 Some((self, timeout))
             },
             Err(e) => {
                 trace!("error reregistering: {:?}", e);
-                self.0.on_error(e.into(), &**scope);
+                self.on_error(e.into(), &**scope);
                 None
             }
         }
@@ -613,40 +612,36 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
 
     /*
     pub fn wakeup<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
-    where F: MessageHandlerFactory<K, T, Output=H> {
-        while let Ok(next) = self.0.ctrl.1.try_recv() {
+    where F: TransactionHandlerFactory<K, T, Output=H> {
+        while let Ok(next) = self.ctrl.1.try_recv() {
             trace!("woke up with {:?}", next);
-            self.0.state.update(next, &**scope);
+            self.state.update(next, &**scope);
         }
         self.ready(EventSet::readable() | EventSet::writable(), scope)
     }
 
     pub fn timeout<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
-    where F: MessageHandlerFactory<K, T, Output=H> {
+    where F: TransactionHandlerFactory<K, T, Output=H> {
         //TODO: check if this was a spurious timeout?
-        self.0.on_error(::Error::Timeout, &**scope);
+        self.on_error(::Error::Timeout, &**scope);
         self.ready(EventSet::none(), scope)
     }
     */
 
-    fn on_remove(self) {
-        self.0.on_remove()
-    }
-
     pub fn key(&self) -> &K {
-        &self.0.key
+        &self.key
     }
 
     /*
     pub fn control(&self) -> Control {
         Control {
-            tx: self.0.ctrl.0.clone(),
+            tx: self.ctrl.0.clone(),
         }
     }
     */
 
     pub fn is_idle(&self) -> bool {
-        if let State::Init { interest: Next_::Wait, .. } = self.0.state {
+        if let State::Init { interest: Next_::Wait, .. } = self.state {
             true
         } else {
             false
@@ -654,7 +649,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
     }
 }
 
-enum State<H: MessageHandler<T>, T: Transport> {
+enum State<H: TransactionHandler<T>, T: Transport> {
     Init {
         interest: Next_,
         timeout: Option<Duration>,
@@ -673,7 +668,7 @@ enum State<H: MessageHandler<T>, T: Transport> {
 }
 
 
-impl<H: MessageHandler<T>, T: Transport> State<H, T> {
+impl<H: TransactionHandler<T>, T: Transport> State<H, T> {
     fn timeout(&self) -> Option<Duration> {
         match *self {
             State::Init { timeout, .. } => timeout,
@@ -683,7 +678,7 @@ impl<H: MessageHandler<T>, T: Transport> State<H, T> {
     }
 }
 
-impl<H: MessageHandler<T>, T: Transport> fmt::Debug for State<H, T> {
+impl<H: TransactionHandler<T>, T: Transport> fmt::Debug for State<H, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             State::Init { interest, timeout } => f.debug_struct("Init")
@@ -698,11 +693,8 @@ impl<H: MessageHandler<T>, T: Transport> fmt::Debug for State<H, T> {
     }
 }
 
-impl<H: MessageHandler<T>, T: Transport> State<H, T> {
-    fn update<F, K>(&mut self, next: Next, factory: &F)
-            where F: MessageHandlerFactory<K, T>,
-                  K: Key
-        {
+impl<H: TransactionHandler<T>, T: Transport> State<H, T> {
+    fn update(&mut self, next: Next) {
             let timeout = next.timeout;
             let state = mem::replace(self, State::Closed);
             match (state, next.interest) {
@@ -762,7 +754,7 @@ impl<H: MessageHandler<T>, T: Transport> State<H, T> {
 
                             match (reading, writing) {
                                 (Reading::KeepAlive, Writing::KeepAlive) => {
-                                    let next = factory.keep_alive_interest();
+                                    let next = Next::read(); /*TODO: factory.keep_alive_interest();*/
                                     mem::replace(self,
                                                  State::Init {
                                                      interest: next.interest,
@@ -946,10 +938,18 @@ impl Chunk {
     }
 }
 
-pub trait MessageHandler<T: Transport> {
-    type Message: Http1Message;
-    fn on_incoming(&mut self, head: http::MessageHead<<Self::Message as Http1Message>::Incoming>, transport: &T) -> Next;
-    fn on_outgoing(&mut self, head: &mut http::MessageHead<<Self::Message as Http1Message>::Outgoing>) -> Next;
+/*
+pub trait TransactionHandler<T: Transport> {
+    type Transaction: Http1Transaction;
+
+    fn ready(&mut self, txn: &mut Transaction<Self::Transaction, T>);
+}
+*/
+
+pub trait TransactionHandler<T: Transport> {
+    type Transaction: Http1Transaction;
+    fn on_incoming(&mut self, head: http::MessageHead<<Self::Transaction as Http1Transaction>::Incoming>, transport: &T) -> Next;
+    fn on_outgoing(&mut self, head: &mut http::MessageHead<<Self::Transaction as Http1Transaction>::Outgoing>) -> Next;
     fn on_decode(&mut self, &mut http::Decoder<T>) -> Next;
     fn on_encode(&mut self, &mut http::Encoder<T>) -> Next;
     fn on_error(&mut self, err: ::Error) -> Next;
@@ -957,33 +957,29 @@ pub trait MessageHandler<T: Transport> {
     fn on_remove(self, T) where Self: Sized;
 }
 
-pub struct Seed<'a, K: Key + 'a>(&'a K/*, &'a channel::Sender<Next>*/);
+
+pub trait ConnectionHandler<T: Transport> {
+    type Txn: TransactionHandler<T>;
+    fn transaction(&mut self) -> Option<Self::Txn>;
+    fn keep_alive_interest(&self) -> Next;
+}
+
+pub trait ConnectionHandlerFactory<K: Key, T: Transport> {
+    type Output: ConnectionHandler<T>;
+    fn create(&mut self, seed: Seed<K>) -> Option<Self::Output>;
+}
+
+pub trait Key: Eq + Hash + Clone + fmt::Debug {}
+impl<T: Eq + Hash + Clone + fmt::Debug> Key for T {}
+
+pub struct Seed<'a, K: Key + 'a>(&'a K);
 
 impl<'a, K: Key + 'a> Seed<'a, K> {
-    /*
-    pub fn control(&self) -> Control {
-        Control {
-            tx: self.1.clone(),
-        }
-    }
-    */
-
     pub fn key(&self) -> &K {
         self.0
     }
 }
 
-
-pub trait MessageHandlerFactory<K: Key, T: Transport> {
-    type Output: MessageHandler<T>;
-
-    fn create(&mut self, seed: Seed<K>) -> Option<Self::Output>;
-
-    fn keep_alive_interest(&self) -> Next;
-}
-
-pub trait Key: Eq + Hash + Clone + fmt::Debug {}
-impl<T: Eq + Hash + Clone + fmt::Debug> Key for T {}
 
 #[cfg(test)]
 mod tests {

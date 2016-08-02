@@ -17,7 +17,7 @@ use version::HttpVersion::{Http10, Http11};
 #[cfg(feature = "serde-serialization")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub use self::conn::{Conn, MessageHandler, MessageHandlerFactory, Seed, Key};
+pub use self::conn::{Conn, TransactionHandler, ConnectionHandler, ConnectionHandlerFactory, Seed, Key};
 
 mod buffer;
 //pub mod channel;
@@ -306,7 +306,7 @@ pub fn should_keep_alive(version: HttpVersion, headers: &Headers) -> bool {
 
 pub type ParseResult<T> = ::Result<Option<(MessageHead<T>, usize)>>;
 
-pub fn parse<T: Http1Message<Incoming=I>, I>(rdr: &[u8]) -> ParseResult<I> {
+pub fn parse<T: Http1Transaction<Incoming=I>, I>(rdr: &[u8]) -> ParseResult<I> {
     h1::parse::<T, I>(rdr)
 }
 
@@ -316,13 +316,13 @@ pub fn parse<T: Http1Message<Incoming=I>, I>(rdr: &[u8]) -> ParseResult<I> {
 
 #[allow(dead_code)]
 #[derive(Debug)]
-pub enum ServerMessage {}
+pub enum ServerTransaction {}
 
 #[allow(dead_code)]
 #[derive(Debug)]
-pub enum ClientMessage {}
+pub enum ClientTransaction {}
 
-pub trait Http1Message {
+pub trait Http1Transaction {
     type Incoming;
     type Outgoing: Default;
     fn parse(bytes: &[u8]) -> ParseResult<Self::Incoming>;
