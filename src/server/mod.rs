@@ -196,10 +196,10 @@ struct Context<F> {
 struct ConstFactory<F>(Rc<RefCell<Context<F>>>);
 
 impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFactory<F> {
-    type Txn = transaction::Transaction<F::Output, T>;
+    type Txn = transaction::Handle<F::Output, T>;
 
     fn transaction(&mut self) -> Option<Self::Txn> {
-        Some(transaction::Transaction::new(self.0.borrow_mut().factory.create()))
+        Some(transaction::Handle::new(self.0.borrow_mut().factory.create()))
     }
 
     fn keep_alive_interest(&self) -> Next {
@@ -213,7 +213,7 @@ impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFac
 
 
 struct Conn<T, F> where T: Transport, F: HandlerFactory<T> {
-    inner: http::Conn<(), T, ConstFactory<F>> //transaction::Transaction<F::Output, T>>,
+    inner: http::Conn<(), T, ConstFactory<F>>
 }
 
 impl<T, F> Task for Conn<T, F>
@@ -265,6 +265,13 @@ impl Listening {
     }
 }
 
+/// dox
+pub trait Handler<T: Transport> {
+    /// dox
+    fn ready(&mut self, txn: &mut Transaction<T>);
+}
+
+/*
 /// A trait to react to server events that happen for each transaction.
 ///
 /// Each event handler returns its desired `Next` action.
@@ -291,6 +298,7 @@ pub trait Handler<T: Transport> {
         debug!("default Handler.on_remove");
     }
 }
+*/
 
 
 /// Used to create a `Handler` when a new transaction is received by the server.
@@ -298,13 +306,13 @@ pub trait HandlerFactory<T: Transport> {
     /// The `Handler` to use for the incoming transaction.
     type Output: Handler<T>;
     /// Creates the associated `Handler`.
-    fn create(&mut self/*, ctrl: http::Control*/) -> Self::Output;
+    fn create(&mut self) -> Self::Output;
 }
 
 impl<F, H, T> HandlerFactory<T> for F
-where F: FnMut(/*http::Control*/) -> H, H: Handler<T>, T: Transport {
+where F: FnMut() -> H, H: Handler<T>, T: Transport {
     type Output = H;
-    fn create(&mut self, /*ctrl: http::Control*/) -> H {
-        self(/*ctrl*/)
+    fn create(&mut self) -> H {
+        self()
     }
 }

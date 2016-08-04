@@ -104,8 +104,7 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
         }
     }
 
-<<<<<<< HEAD
-    fn parse(&mut self) -> ::Result<http::MessageHead<<<H as MessageHandler<T>>::Message as Http1Message>::Incoming>> {
+    fn parse(&mut self) -> ::Result<http::MessageHead<<<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction as Http1Transaction>::Incoming>> {
         match self.buf.read_from(&mut self.transport) {
             Ok(0) => {
                 trace!("parse eof");
@@ -116,13 +115,6 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
                 io::ErrorKind::WouldBlock => {},
                 _ => return Err(e.into())
             }
-=======
-    fn parse(&mut self) -> ::Result<http::MessageHead<<<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction as Http1Transaction>::Incoming>> {
-        let n = try!(self.buf.read_from(&mut self.transport));
-        if n == 0 {
-            trace!("parse eof");
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "parse eof").into());
->>>>>>> connection handler
         }
         match try!(http::parse::<<<H as ConnectionHandler<T>>::Txn as TransactionHandler<T>>::Transaction, _>(self.buf.bytes())) {
             Some((head, len)) => {
@@ -142,6 +134,7 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
         }
     }
 
+    /*
     fn read(&mut self, state: State<H::Txn, T>) -> State<H::Txn, T> {
          match state {
             State::Init { interest: Next_::Read, .. } => {
@@ -465,7 +458,9 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
         };
         self.state.update(next);
     }
+    */
 
+    /*
     fn on_readable(&mut self) {
         trace!("on_readable -> {:?}", self.state);
         let state = mem::replace(&mut self.state, State::Closed);
@@ -479,6 +474,7 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
         self.state = self.write(state);
         trace!("on_writable <- {:?}", self.state);
     }
+    */
 
     fn on_remove(self) {
         debug!("on_remove");
@@ -505,6 +501,7 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
         }
     }
 
+    // TODO: leave this in the ConnectionHandler
     pub fn keep_alive(mut self, val: bool) -> Conn<K, T, H> {
         self.keep_alive_enabled = val;
         self
@@ -512,48 +509,6 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
 
     pub fn ready(&mut self) -> io::Result<Tick> {
         trace!("Conn::ready blocked={:?}", self.transport.blocked());
-
-        /*
-        if events.is_error() {
-            match self.transport.take_socket_error() {
-                Ok(_) => {
-                    trace!("is_error, but not socket error");
-                    // spurious?
-                },
-                Err(e) => self.on_error(e.into(), &**scope)
-            }
-        }
-        */
-
-        // if the user had an io interest, but the transport was blocked differently,
-        // the event needs to be translated to what the user was actually expecting.
-        //
-        // Example:
-        // - User asks for `Next::write().
-        // - But transport is in the middle of renegotiating TLS, and is blocked on reading.
-        // - hyper should not wait on the `write` event, since epoll already
-        //   knows it is writable. We would just loop a whole bunch, and slow down.
-        // - So instead, hyper waits on the event needed to unblock the transport, `read`.
-        // - Once epoll detects the transport is readable, it will alert hyper
-        //   with a `readable` event.
-        // - hyper needs to translate that `readable` event back into a `write`,
-        //   since that is actually what the Handler wants.
-
-        /*
-        let events = if let Some(blocked) = self.transport.blocked() {
-            let interest = self.interest();
-            trace!("translating blocked={:?}, interest={:?}", blocked, interest);
-            match (blocked, interest) {
-                (Blocked::Read, Reg::Write) => EventSet::writable(),
-                (Blocked::Write, Reg::Read) => EventSet::readable(),
-                // otherwise, the transport was blocked on the same thing the user wanted
-                _ => events
-            }
-        } else {
-            events
-        };
-        */
-
         let was_init = match self.0.state {
             State::Init { .. } => true,
             _ => false
@@ -577,49 +532,9 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
                 }
             }
         }
-        /*
-        let events = match self.register() {
-            Reg::Read => EventSet::readable(),
-            Reg::Write => EventSet::writable(),
-            Reg::ReadWrite => EventSet::readable() | EventSet::writable(),
-            Reg::Wait => EventSet::none(),
-            Reg::Remove => {
-                trace!("removing transport");
-                let _ = scope.deregister(&self.transport);
-                self.on_remove();
-                return None;
-            },
-        };
-
-        if events.is_readable() && self.can_read_more(was_init) {
-            return self.ready(events, scope);
-        }
-
-        trace!("scope.reregister({:?})", events);
-        match scope.reregister(&self.transport, events, PollOpt::level()) {
-            Ok(..) => {
-                let timeout = self.state.timeout();
-                Some((self, timeout))
-            },
-            Err(e) => {
-                trace!("error reregistering: {:?}", e);
-                self.on_error(e.into(), &**scope);
-                None
-            }
-        }
-        */
     }
 
     /*
-    pub fn wakeup<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
-    where F: TransactionHandlerFactory<K, T, Output=H> {
-        while let Ok(next) = self.ctrl.1.try_recv() {
-            trace!("woke up with {:?}", next);
-            self.state.update(next, &**scope);
-        }
-        self.ready(EventSet::readable() | EventSet::writable(), scope)
-    }
-
     pub fn timeout<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
     where F: TransactionHandlerFactory<K, T, Output=H> {
         //TODO: check if this was a spurious timeout?
@@ -938,14 +853,13 @@ impl Chunk {
     }
 }
 
-/*
 pub trait TransactionHandler<T: Transport> {
     type Transaction: Http1Transaction;
 
     fn ready(&mut self, txn: &mut Transaction<Self::Transaction, T>);
 }
-*/
 
+/*
 pub trait TransactionHandler<T: Transport> {
     type Transaction: Http1Transaction;
     fn on_incoming(&mut self, head: http::MessageHead<<Self::Transaction as Http1Transaction>::Incoming>, transport: &T) -> Next;
@@ -957,6 +871,7 @@ pub trait TransactionHandler<T: Transport> {
     fn on_remove(self, T) where Self: Sized;
 }
 
+*/
 
 pub trait ConnectionHandler<T: Transport> {
     type Txn: TransactionHandler<T>;

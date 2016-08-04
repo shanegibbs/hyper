@@ -11,20 +11,58 @@ use super::{Handler, request, response};
 /// This should be really thin glue between `http::TransactionHandler` and
 /// `server::Handler`, but largely just providing the proper types one
 /// would expect in a Server Handler.
-pub struct Transaction<H: Handler<T>, T: Transport> {
+pub struct Handle<H: Handler<T>, T: Transport> {
     handler: H,
     _marker: PhantomData<T>
 }
 
-impl<H: Handler<T>, T: Transport> Transaction<H, T> {
-    pub fn new(handler: H) -> Transaction<H, T> {
-        Transaction {
+impl<H: Handler<T>, T: Transport> Handle<H, T> {
+    pub fn new(handler: H) -> Handle<H, T> {
+        Handle {
             handler: handler,
             _marker: PhantomData,
         }
     }
 }
 
+impl<H: Handler<T>, T: Transport> http::TransactionHandler for Handle<H, T> {
+    type Transaction = http::ServerTransaction;
+
+    fn ready(&mut self, txn: &mut http::ServerTransaction<T>) {
+        self.handler.ready(txn)
+    }
+}
+
+pub struct Transaction<'a, T: 'a> {
+    inner: &'a mut http::ServerTransaction<T>,
+}
+
+impl<'a, T: Transport + 'a> Transaction<'a, T> {
+    pub fn request(&mut self) -> ::Result<Request> {
+        self.inner.incoming().unwrap()
+    }
+
+    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        self.inner.try_read(buf)
+    }
+
+    pub fn response(&mut self) -> &mut Response {
+        self.inner.outgoing_mut()
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.inner.write(data)
+    }
+
+    pub fn try_write(&mut self, data: &[u8]) -> io::Result<Option<usize>> {
+        self.inner.try_write(data)
+    }
+}
+/*
 impl<H: Handler<T>, T: Transport> http::TransactionHandler<T> for Transaction<H, T> {
     type Transaction = http::ServerTransaction;
 
@@ -55,3 +93,4 @@ impl<H: Handler<T>, T: Transport> http::TransactionHandler<T> for Transaction<H,
         self.handler.on_remove(transport);
     }
 }
+*/

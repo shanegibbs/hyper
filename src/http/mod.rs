@@ -310,15 +310,9 @@ pub fn parse<T: Http1Transaction<Incoming=I>, I>(rdr: &[u8]) -> ParseResult<I> {
     h1::parse::<T, I>(rdr)
 }
 
-// These 2 enums are not actually dead_code. They are used in the server and
-// and client modules, respectively. However, their being used as associated
-// types doesn't mark them as used, so the dead_code linter complains.
-
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ServerTransaction {}
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ClientTransaction {}
 
