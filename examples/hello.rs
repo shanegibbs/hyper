@@ -1,36 +1,29 @@
 #![deny(warnings)]
 extern crate hyper;
-extern crate env_logger;
+extern crate pretty_env_logger;
 extern crate num_cpus;
 
-use hyper::{Decoder, Encoder, Next, HttpStream};
-use hyper::server::{Server, Handler, Request, Response/*, HttpListener*/};
+use hyper::{HttpStream};
+use hyper::header::{ContentLength, /*ContentType*/};
+use hyper::server::{Server, Handler, Transaction/*, HttpListener*/};
 
 static PHRASE: &'static [u8] = b"Hello World!";
 
 struct Hello;
 
 impl Handler<HttpStream> for Hello {
-    fn on_request(&mut self, _: Request<HttpStream>) -> Next {
-        Next::write()
-    }
-    fn on_request_readable(&mut self, _: &mut Decoder<HttpStream>) -> Next {
-        Next::write()
-    }
-    fn on_response(&mut self, response: &mut Response) -> Next {
-        use hyper::header::ContentLength;
-        response.headers_mut().set(ContentLength(PHRASE.len() as u64));
-        Next::write()
-    }
-    fn on_response_writable(&mut self, encoder: &mut Encoder<HttpStream>) -> Next {
-        let n = encoder.write(PHRASE).unwrap();
+    fn ready(&mut self, txn: &mut Transaction<HttpStream>) {
+        txn.response().headers_mut()
+            .set(ContentLength(PHRASE.len() as u64));
+            //.set(ContentType::plaintext());
+        let n = txn.write(PHRASE).unwrap();
         debug_assert_eq!(n, PHRASE.len());
-        Next::end()
     }
 }
 
 fn main() {
-    env_logger::init().unwrap();
+    //env_logger::init().unwrap();
+    pretty_env_logger::init();
 
     println!("Listening on http://127.0.0.1:3000");
     Server::http(&"127.0.0.1:3000".parse().unwrap()).unwrap()

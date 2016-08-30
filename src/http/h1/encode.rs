@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::cmp;
 use std::io::{self, Write};
 
-use http::internal::{AtomicWrite, WriteBuf};
+use http::{AtomicWrite, WriteBuf};
 
 /// Encoders to handle different Transfer-Encodings.
 #[derive(Debug, Clone)]

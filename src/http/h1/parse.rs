@@ -60,7 +60,7 @@ impl Http1Transaction for ServerTransaction {
     }
 
 
-    fn encode(mut head: MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> Encoder {
+    fn encode(head: &mut MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> Encoder {
         use ::header;
         trace!("writing head: {:?}", head);
 
@@ -162,7 +162,7 @@ impl Http1Transaction for ClientTransaction {
         }
     }
 
-    fn encode(mut head: MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> Encoder {
+    fn encode(head: &mut MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> Encoder {
         trace!("writing head: {:?}", head);
 
 

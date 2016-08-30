@@ -20,10 +20,78 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use self::conn::{Conn, TransactionHandler, ConnectionHandler, ConnectionHandlerFactory, Seed, Key};
 
 mod buffer;
-//pub mod channel;
 mod conn;
 mod h1;
 //mod h2;
+
+pub struct Transaction<'a, T: Transport + 'a, X: Http1Transaction + 'a> {
+    inner: TransactionImpl<'a, T, X>,
+}
+
+enum TransactionImpl<'a, T: Transport + 'a, X: Http1Transaction + 'a> {
+    H1(h1::txn::TxnIo<'a, T, X>)
+}
+
+macro_rules! nonblocking {
+    ($e:expr) => ({
+        match $e {
+            Ok(n) => Ok(Some(n)),
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock => Ok(None),
+                _ => Err(e)
+            }
+        }
+    });
+}
+
+impl<'a, T: Transport + 'a, X: Http1Transaction + 'a> Transaction<'a, T, X> {
+
+    fn h1(txn: h1::txn::TxnIo<'a, T, X>) -> Transaction<'a, T, X> {
+        Transaction {
+            inner: TransactionImpl::H1(txn),
+        }
+    }
+
+    pub fn incoming(&mut self) -> ::Result<MessageHead<X::Incoming>> {
+        unimplemented!("Txn.incoming")
+    }
+
+    #[inline]
+    pub fn outgoing(&mut self) -> &mut MessageHead<X::Outgoing> {
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.outgoing(),
+        }
+    }
+
+    #[inline]
+    pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.write(data),
+        }
+    }
+
+    #[inline]
+    pub fn try_write(&mut self, data: &[u8]) -> io::Result<Option<usize>> {
+        nonblocking!(self.write(data))
+    }
+
+    #[inline]
+    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.read(buf),
+        }
+    }
+
+    #[inline]
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        nonblocking!(self.read(buf))
+    }
+
+    #[inline]
+    pub fn end(&mut self) {
+        unimplemented!("Txn.end")
+    }
+}
 
 /// Wraps a `Transport` to provide HTTP decoding when reading.
 #[derive(Debug)]
@@ -187,37 +255,97 @@ impl<'a, T: Transport> Write for Encoder<'a, T> {
     }
 }
 
+/*
 /// Because privacy rules. Reasons.
 /// https://github.com/rust-lang/rust/issues/30905
 mod internal {
     use std::io::{self, Write};
-
-    #[derive(Debug, Clone)]
-    pub struct WriteBuf<T: AsRef<[u8]>> {
-        pub bytes: T,
-        pub pos: usize,
-    }
-
-    pub trait AtomicWrite {
-        fn write_atomic(&mut self, data: &[&[u8]]) -> io::Result<usize>;
-    }
-
-    /*
-    #[cfg(not(windows))]
-    impl<T: Write + ::vecio::Writev> AtomicWrite for T {
-
-        fn write_atomic(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
-            self.writev(bufs)
-        }
-
-    }
-
-    #[cfg(windows)]
     */
-    impl<T: Write> AtomicWrite for T {
-        fn write_atomic(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
-            let vec = bufs.concat();
-            self.write(&vec)
+
+#[derive(Debug, Clone)]
+pub struct WriteBuf<T: AsRef<[u8]>> {
+    pub bytes: T,
+    pub pos: usize,
+}
+
+impl<T: AsRef<[u8]>> WriteBuf<T> {
+    pub fn new(bytes: T) -> WriteBuf<T> {
+        WriteBuf {
+            bytes: bytes,
+            pos: 0,
+        }
+    }
+}
+
+pub trait AtomicWrite {
+    fn write_atomic(&mut self, data: &[&[u8]]) -> io::Result<usize>;
+}
+
+/*
+#[cfg(not(windows))]
+impl<T: Write + ::vecio::Writev> AtomicWrite for T {
+
+    fn write_atomic(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
+        self.writev(bufs)
+    }
+
+}
+
+#[cfg(windows)]
+*/
+impl<T: Write> AtomicWrite for T {
+    fn write_atomic(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
+        if cfg!(not(windows)) {
+            warn!("write_atomic not using writev");
+        }
+        let vec = bufs.concat();
+        self.write(&vec)
+    }
+}
+//}
+
+pub struct Io<T> {
+    buf: self::buffer::Buffer,
+    transport: T,
+}
+
+impl<T> fmt::Debug for Io<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Io")
+            .field("buf", &self.buf)
+            .finish()
+    }
+}
+
+const MAX_BUFFER_SIZE: usize = 8192 + 4096 * 100;
+
+impl<T: Transport> Io<T> {
+    fn parse<S: Http1Transaction>(&mut self) -> ::Result<Option<MessageHead<S::Incoming>>> {
+        match self.buf.read_from(&mut self.transport) {
+            Ok(0) => {
+                trace!("parse eof");
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "parse eof").into());
+            }
+            Ok(_) => {},
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock => {},
+                _ => return Err(e.into())
+            }
+        }
+        match try!(parse::<S, _>(self.buf.bytes())) {
+            Some((head, len)) => {
+                trace!("parsed {} bytes out of {}", len, self.buf.len());
+                self.buf.consume(len);
+                Ok(Some(head))
+            },
+            None => {
+                if self.buf.len() >= MAX_BUFFER_SIZE {
+                    debug!("MAX_BUFFER_SIZE reached, closing");
+                    Err(::Error::TooLarge)
+                } else {
+                    Ok(None)
+                }
+            },
         }
     }
 }
@@ -321,145 +449,9 @@ pub trait Http1Transaction {
     type Outgoing: Default;
     fn parse(bytes: &[u8]) -> ParseResult<Self::Incoming>;
     fn decoder(head: &MessageHead<Self::Incoming>) -> ::Result<h1::Decoder>;
-    fn encode(head: MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> h1::Encoder;
+    fn encode(head: &mut MessageHead<Self::Outgoing>, dst: &mut Vec<u8>) -> h1::Encoder;
 }
 
-/// Used to signal desired events when working with asynchronous IO.
-#[must_use]
-#[derive(Clone)]
-pub struct Next {
-    interest: Next_,
-    timeout: Option<Duration>,
-}
-
-impl fmt::Debug for Next {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        try!(write!(f, "Next::{:?}", &self.interest));
-        match self.timeout {
-            Some(ref d) => write!(f, "({:?})", d),
-            None => Ok(())
-        }
-    }
-}
-
-// Internal enum for `Next`
-#[derive(Debug, Clone, Copy)]
-enum Next_ {
-    Read,
-    Write,
-    ReadWrite,
-    Wait,
-    End,
-    Remove,
-}
-
-// An enum representing all the possible actions to taken when registering
-// with the event loop.
-#[derive(Debug, Clone, Copy)]
-enum Reg {
-    Read,
-    Write,
-    ReadWrite,
-    Wait,
-    Remove
-}
-
-/// A notifier to wakeup a socket after having used `Next::wait()`
-#[derive(Debug, Clone)]
-pub struct Control {
-    //tx: self::channel::Sender<Next>,
-}
-
-/*
-impl Control {
-    /// Wakeup a waiting socket to listen for a certain event.
-    pub fn ready(&self, next: Next) -> Result<(), ControlError> {
-        //TODO: assert!( next.interest != Next_::Wait ) ?
-        self.tx.send(next).map_err(|_| ControlError(()))
-    }
-}
-*/
-
-/// An error occured trying to tell a Control it is ready.
-#[derive(Debug)]
-pub struct ControlError(());
-
-impl ::std::error::Error for ControlError {
-    fn description(&self) -> &str {
-        "Cannot wakeup event loop: loop is closed"
-    }
-}
-
-impl fmt::Display for ControlError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(::std::error::Error::description(self))
-    }
-}
-
-impl Next {
-    fn new(interest: Next_) -> Next {
-        Next {
-            interest: interest,
-            timeout: None,
-        }
-    }
-
-    /*
-    fn reg(&self) -> Reg {
-        self.interest.register()
-    }
-    */
-
-    /// Signals the desire to read from the transport.
-    pub fn read() -> Next {
-        Next::new(Next_::Read)
-    }
-
-    /// Signals the desire to write to the transport.
-    pub fn write() -> Next {
-        Next::new(Next_::Write)
-    }
-
-    /// Signals the desire to read and write to the transport.
-    pub fn read_and_write() -> Next {
-        Next::new(Next_::ReadWrite)
-    }
-
-    /// Signals the desire to end the current HTTP message.
-    pub fn end() -> Next {
-        Next::new(Next_::End)
-    }
-
-    /// Signals the desire to abruptly remove the current transport from the
-    /// event loop.
-    pub fn remove() -> Next {
-        Next::new(Next_::Remove)
-    }
-
-    /// Signals the desire to wait until some future time before acting again.
-    pub fn wait() -> Next {
-        Next::new(Next_::Wait)
-    }
-
-    /// Signals a maximum duration to be waited for the desired event.
-    pub fn timeout(mut self, dur: Duration) -> Next {
-        self.timeout = Some(dur);
-        self
-    }
-}
-
-impl Next_ {
-    fn register(&self) -> Reg {
-        match *self {
-            Next_::Read => Reg::Read,
-            Next_::Write => Reg::Write,
-            Next_::ReadWrite => Reg::ReadWrite,
-            Next_::Wait => Reg::Wait,
-            Next_::End => Reg::Remove,
-            Next_::Remove => Reg::Remove,
-        }
-    }
-}
 
 #[test]
 fn test_should_keep_alive() {

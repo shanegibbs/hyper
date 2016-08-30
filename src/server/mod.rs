@@ -11,12 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::task::{Task, Tick};
+use futures::{Future, Poll};
+use futures::stream::Stream;
 
 pub use self::request::Request;
 pub use self::response::Response;
+pub use self::txn::Transaction;
 
-use http::{self, Next};
+use http;
 
 pub use net::{Accept, HttpListener};
 use net::{HttpStream, Transport};
@@ -28,7 +30,7 @@ use net::{SslServer, Transport};
 
 mod request;
 mod response;
-mod transaction;
+mod txn;
 
 /// A configured `Server` ready to run.
 pub struct ServerLoop<A, H> where A: Accept, H: HandlerFactory<A::Output> {
@@ -45,8 +47,7 @@ impl<A: Accept, H: HandlerFactory<A::Output>> fmt::Debug for ServerLoop<A, H> {
 /// A Server that can accept incoming network requests.
 #[derive(Debug)]
 pub struct Server<A> {
-    lead_listener: A,
-    other_listeners: Vec<A>,
+    listeners: Vec<A>,
     keep_alive: bool,
     idle_timeout: Option<Duration>,
     max_sockets: usize,
@@ -56,19 +57,11 @@ impl<A: Accept> Server<A> {
     /// Creates a new Server from one or more Listeners.
     ///
     /// Panics if listeners is an empty iterator.
-    pub fn new(listener: A) -> Server<A> {
-    /*
     pub fn new<I: IntoIterator<Item = A>>(listeners: I) -> Server<A> {
-        let mut listeners = listeners.into_iter();
-        let lead_listener = listeners.next().expect("Server::new requires at least 1 listener");
-        let other_listeners = listeners.collect::<Vec<_>>();
-    */
-        let lead_listener = listener;
-        let other_listeners = Vec::new();
+        let listeners = listeners.into_iter().collect();
 
         Server {
-            lead_listener: lead_listener,
-            other_listeners: other_listeners,
+            listeners: listeners,
             keep_alive: true,
             idle_timeout: Some(Duration::from_secs(10)),
             max_sockets: 4096,
@@ -103,9 +96,7 @@ impl<A: Accept> Server<A> {
 impl Server<HttpListener> { //<H: HandlerFactory<<HttpListener as Accept>::Output>> Server<HttpListener, H> {
     /// Creates a new HTTP server config listening on the provided address.
     pub fn http(addr: &SocketAddr) -> ::Result<Server<HttpListener>> {
-        use ::mio;
-        mio::tcp::TcpListener::bind(addr)
-            .map(HttpListener)
+        HttpListener::bind(addr)
             .map(Server::new)
             .map_err(From::from)
     }
@@ -128,41 +119,42 @@ impl<S: SslServer> Server<HttpsListener<S>> {
 
 impl/*<A: Accept>*/ Server<HttpListener> {
     /// Binds to a socket and starts handling connections.
-    pub fn handle<H>(self, factory: H) -> ::Result<(Listening, ServerLoop<HttpListener, H>)>
+    pub fn handle<H>(mut self, factory: H) -> ::Result<(Listening, ServerLoop<HttpListener, H>)>
     where H: HandlerFactory<HttpStream/*A::Output*/> + Send + 'static {
         use std::rc::Rc;
         use std::cell::RefCell;
-        use tokio::reactor::{self, Reactor};
-        use tokio::task::Tick;
-        let reactor = try!(Reactor::default());
+        use tokio::{Loop, TcpListener};
 
+        let mut reactor = try!(Loop::new());
+
+        let listener = self.listeners.remove(0).0;
+        let addr = try!(listener.local_addr());
         let handle = reactor.handle();
-        handle.oneshot(move || {
-            let listener = ::tokio::tcp::TcpListener::watch(self.lead_listener.0).unwrap();
-            let keep_alive = self.keep_alive;
-            let idle_timeout = self.idle_timeout;
+
+        let listener = TcpListener::from_listener(listener, &addr, handle);
+        let keep_alive = self.keep_alive;
+        let idle_timeout = self.idle_timeout;
+
+
+        let pin = reactor.pin();
+        let work = listener.and_then(move |listener| {
 
             let factory = Rc::new(RefCell::new(Context {
                 factory: factory,
                 idle_timeout: idle_timeout,
                 keep_alive: keep_alive
             }));
-
-            reactor::schedule(move || {
-                while let Some(socket) = try!(listener.accept()) {
-                    let socket = try!(::tokio::tcp::TcpStream::watch(socket));
-                    let conn = http::Conn::new((), socket, ConstFactory(factory.clone()), Next::read());
-                    let conn = Conn {
-                        inner: conn,
-                    };
-                    reactor::schedule(conn);
-                }
-
-                Ok(Tick::WouldBlock)
-            });
+            listener.incoming().for_each(move |(sock, addr)| {
+                let socket = HttpStream(sock);
+                let conn = http::Conn::new(addr, socket, ConstFactory(factory.clone()));
+                pin.add_loop_data(Conn {
+                    inner: conn,
+                }).forget();
+                Ok(())
+            })
         });
 
-        reactor.run();
+        reactor.run(work);
         unimplemented!()
     }
 }
@@ -196,12 +188,13 @@ struct Context<F> {
 struct ConstFactory<F>(Rc<RefCell<Context<F>>>);
 
 impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFactory<F> {
-    type Txn = transaction::Handle<F::Output, T>;
+    type Txn = txn::Handle<F::Output, T>;
 
     fn transaction(&mut self) -> Option<Self::Txn> {
-        Some(transaction::Handle::new(self.0.borrow_mut().factory.create()))
+        Some(txn::Handle::new(self.0.borrow_mut().factory.create()))
     }
 
+    /*
     fn keep_alive_interest(&self) -> Next {
         if let Some(dur) = self.0.borrow().idle_timeout {
             Next::read().timeout(dur)
@@ -209,18 +202,21 @@ impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFac
             Next::read()
         }
     }
+    */
 }
 
 
 struct Conn<T, F> where T: Transport, F: HandlerFactory<T> {
-    inner: http::Conn<(), T, ConstFactory<F>>
+    inner: http::Conn<SocketAddr, T, ConstFactory<F>>
 }
 
-impl<T, F> Task for Conn<T, F>
+impl<T, F> Future for Conn<T, F>
 where T: Transport,
       F: HandlerFactory<T> {
-    fn tick(&mut self) -> io::Result<Tick> {
-        self.inner.ready()
+    type Item = ();
+    type Error = ::error::Void;
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.inner.poll()
     }
 }
 
@@ -265,41 +261,24 @@ impl Listening {
     }
 }
 
+struct Closing {
+    _inner: (),
+}
+
+impl Future for Closing {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        unimplemented!("Closing::poll()")
+    }
+}
+
 /// dox
 pub trait Handler<T: Transport> {
     /// dox
     fn ready(&mut self, txn: &mut Transaction<T>);
 }
-
-/*
-/// A trait to react to server events that happen for each transaction.
-///
-/// Each event handler returns its desired `Next` action.
-pub trait Handler<T: Transport> {
-    /// This event occurs first, triggering when a `Request` has been parsed.
-    fn on_request(&mut self, request: Request<T>) -> Next;
-    /// This event occurs each time the `Request` is ready to be read from.
-    fn on_request_readable(&mut self, request: &mut http::Decoder<T>) -> Next;
-    /// This event occurs after the first time this handled signals `Next::write()`.
-    fn on_response(&mut self, response: &mut Response) -> Next;
-    /// This event occurs each time the `Response` is ready to be written to.
-    fn on_response_writable(&mut self, response: &mut http::Encoder<T>) -> Next;
-
-    /// This event occurs whenever an `Error` occurs outside of the other events.
-    ///
-    /// This could IO errors while waiting for events, or a timeout, etc.
-    fn on_error(&mut self, err: ::Error) -> Next where Self: Sized {
-        debug!("default Handler.on_error({:?})", err);
-        http::Next::remove()
-    }
-
-    /// This event occurs when this Handler has requested to remove the Transport.
-    fn on_remove(self, _transport: T) where Self: Sized {
-        debug!("default Handler.on_remove");
-    }
-}
-*/
-
 
 /// Used to create a `Handler` when a new transaction is received by the server.
 pub trait HandlerFactory<T: Transport> {

@@ -1,3 +1,5 @@
+fn main() {}
+/*
 #![deny(warnings)]
 extern crate hyper;
 
@@ -80,3 +82,4 @@ fn main() {
     let _  = rx.recv();
     client.close();
 }
+*/

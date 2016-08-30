@@ -15,33 +15,29 @@
 //! [typed Headers system](header/index.html).
 //!
 //! If just getting started, consider looking over the **[Guide](../guide/)**.
-extern crate rustc_serialize as serialize;
-extern crate time;
-#[macro_use] extern crate url;
+
+extern crate cookie;
+extern crate futures;
+extern crate httparse;
+#[macro_use] extern crate language_tags;
+#[macro_use] extern crate log;
+#[macro_use] extern crate mime as mime_crate;
+extern crate mio;
 #[cfg(feature = "openssl")]
 extern crate openssl;
 #[cfg(feature = "openssl-verify")]
 extern crate openssl_verify;
+extern crate rustc_serialize as serialize;
 #[cfg(feature = "security-framework")]
 extern crate security_framework;
 #[cfg(feature = "serde-serialization")]
 extern crate serde;
-extern crate cookie;
-extern crate unicase;
-extern crate httparse;
-extern crate tokio;
+extern crate time;
+extern crate tokio_core as tokio;
 extern crate spmc;
+extern crate unicase;
+#[macro_use] extern crate url;
 extern crate vecio;
-extern crate mio;
-
-#[macro_use]
-extern crate language_tags;
-
-#[macro_use]
-extern crate mime as mime_crate;
-
-#[macro_use]
-extern crate log;
 
 #[cfg(all(test, feature = "nightly"))]
 extern crate test;
@@ -51,13 +47,24 @@ pub use url::Url;
 //pub use client::Client;
 pub use error::{Result, Error};
 pub use header::Headers;
-pub use http::{Next, Encoder, Decoder, Control, ControlError};
 pub use method::Method::{self, Get, Head, Post, Delete};
 pub use net::{HttpStream, Transport};
 pub use status::StatusCode::{self, Ok, BadRequest, NotFound};
 pub use server::Server;
 pub use uri::RequestUri;
 pub use version::HttpVersion;
+
+macro_rules! unimplemented {
+    () => ({
+        panic!("unimplemented")
+    });
+    ($msg:expr) => ({
+        unimplemented!("{}", $msg)
+    });
+    ($fmt:expr, $($arg:tt)*) => ({
+        panic!(concat!("unimplemented: ", $fmt), $($arg)*)
+    });
+}
 
 #[cfg(test)]
 mod mock;
@@ -66,7 +73,7 @@ pub mod error;
 pub mod method;
 pub mod header;
 mod http;
-//pub mod net;
+pub mod net;
 pub mod server;
 pub mod status;
 pub mod uri;
@@ -75,33 +82,6 @@ pub mod version;
 /// Re-exporting the mime crate, for convenience.
 pub mod mime {
     pub use mime_crate::*;
-}
-
-pub mod net {
-    pub use tokio::tcp::{TcpStream as HttpStream};
-    use std::io::{Read, Write};
-    pub trait Transport: Read + Write {
-        fn blocked(&self) -> Option<Blocked> {
-            None
-        }
-    }
-    impl<T: Read + Write> Transport for T {}
-
-    #[derive(Debug)]
-    pub enum Blocked {
-        Read,
-        Write
-    }
-
-    pub trait Accept {
-        type Output: Transport;
-    }
-
-    impl<T> Accept for T {
-        type Output = ::tokio::tcp::TcpStream;
-    }
-
-    pub struct HttpListener(pub ::mio::tcp::TcpListener);
 }
 
 /*

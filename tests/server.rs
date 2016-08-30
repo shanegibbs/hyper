@@ -6,9 +6,8 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use hyper::{Next, Encoder, Decoder};
 use hyper::net::{HttpListener, HttpStream};
-use hyper::server::{Server, Handler, Request, Response};
+use hyper::server::{Server, Handler, Transaction};
 
 struct Serve {
     listening: Option<hyper::server::Listening>,
@@ -81,6 +80,14 @@ struct TestHandler {
     reply: Vec<Reply>,
     peeked: Option<Vec<u8>>,
     timeout: Option<Duration>,
+    state: State,
+}
+
+enum State {
+    Read,
+    Reply,
+    Write,
+    End
 }
 
 enum Reply {
@@ -94,70 +101,59 @@ enum Msg {
     Chunk(Vec<u8>),
 }
 
-impl TestHandler {
-    fn next(&self, next: Next) -> Next {
-        if let Some(dur) = self.timeout {
-            next.timeout(dur)
-        } else {
-            next
-        }
-    }
-}
-
 impl Handler<HttpStream> for TestHandler {
-    fn on_request(&mut self, _req: Request<HttpStream>) -> Next {
-        //self.tx.send(Msg::Head(req)).unwrap();
-        self.next(Next::read())
-    }
-
-    fn on_request_readable(&mut self, decoder: &mut Decoder<HttpStream>) -> Next {
-        let mut vec = vec![0; 1024];
-        match decoder.read(&mut vec) {
-            Ok(0) => {
-                self.next(Next::write())
-            }
-            Ok(n) => {
-                vec.truncate(n);
-                self.tx.send(Msg::Chunk(vec)).unwrap();
-                self.next(Next::read())
-            }
-            Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock => self.next(Next::read()),
-                _ => panic!("test error: {}", e)
-            }
-        }
-    }
-
-    fn on_response(&mut self, res: &mut Response) -> Next {
-        for reply in self.reply.drain(..) {
-            match reply {
-                Reply::Status(s) => {
-                    res.set_status(s);
-                },
-                Reply::Headers(headers) => {
-                    use std::iter::Extend;
-                    res.headers_mut().extend(headers.iter());
-                },
-                Reply::Body(body) => {
-                    self.peeked = Some(body);
-                },
-            }
-        }
-
-        if self.peeked.is_some() {
-            self.next(Next::write())
-        } else {
-            self.next(Next::end())
-        }
-    }
-
-    fn on_response_writable(&mut self, encoder: &mut Encoder<HttpStream>) -> Next {
-        match self.peeked {
-            Some(ref body) => {
-                encoder.write(body).unwrap();
-                self.next(Next::end())
+    fn ready(&mut self, txn: &mut Transaction<HttpStream>) {
+        match self.state {
+            State::Read => {
+                let mut vec = vec![0; 1024];
+                match txn.read(&mut vec) {
+                    Ok(0) => {
+                        self.state = State::Reply;
+                    }
+                    Ok(n) => {
+                        vec.truncate(n);
+                        self.tx.send(Msg::Chunk(vec)).unwrap();
+                    }
+                    Err(e) => match e.kind() {
+                        io::ErrorKind::WouldBlock => {},
+                        _ => panic!("test error: {}", e)
+                    }
+                }
             },
-            None => self.next(Next::end())
+            State::Reply => {
+                let mut res = txn.response();
+                for reply in self.reply.drain(..) {
+                    match reply {
+                        Reply::Status(s) => {
+                            res.set_status(s);
+                        },
+                        Reply::Headers(headers) => {
+                            use std::iter::Extend;
+                            res.headers_mut().extend(headers.iter());
+                        },
+                        Reply::Body(body) => {
+                            self.peeked = Some(body);
+                        },
+                    }
+                }
+
+                if self.peeked.is_some() {
+                    self.state = State::Write;
+                } else {
+                    txn.end();
+                    self.state = State::End
+                }
+            },
+            State::Write => {
+                if let Some(body) = self.peeked.take() {
+                    txn.write(&body).unwrap();
+                }
+                self.state = State::End;
+                txn.end();
+            },
+            State::End => {
+                txn.end();
+            }
         }
     }
 }
@@ -193,6 +189,7 @@ fn serve_n_with_timeout(n: u32, dur: Option<Duration>) -> Serve {
                 timeout: dur,
                 reply: replies,
                 peeked: None,
+                state: State::Read,
             }
         }).unwrap();
 
@@ -308,35 +305,6 @@ fn server_post_with_chunked_body() {
 
     assert_eq!(server.body(), b"qwert");
 }
-
-/*
-#[test]
-fn server_empty_response() {
-    let server = serve();
-    server.reply()
-        .status(hyper::Ok);
-    let mut req = TcpStream::connect(server.addr()).unwrap();
-    req.write_all(b"\
-        GET / HTTP/1.1\r\n\
-        Host: example.domain\r\n\
-        Connection: close\r\n
-        \r\n\
-    ").unwrap();
-
-    let mut response = String::new();
-    req.read_to_string(&mut response).unwrap();
-
-    assert_eq!(response, "foo");
-    assert!(!response.contains("Transfer-Encoding: chunked\r\n"));
-
-    let mut lines = response.lines();
-    assert_eq!(lines.next(), Some("HTTP/1.1 200 OK"));
-
-    let mut lines = lines.skip_while(|line| !line.is_empty());
-    assert_eq!(lines.next(), Some(""));
-    assert_eq!(lines.next(), None);
-}
-*/
 
 #[test]
 fn server_empty_response_chunked() {
