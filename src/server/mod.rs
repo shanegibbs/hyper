@@ -188,10 +188,10 @@ struct Context<F> {
 struct ConstFactory<F>(Rc<RefCell<Context<F>>>);
 
 impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFactory<F> {
-    type Txn = txn::Handle<F::Output, T>;
+    type Txn = txn::Handle<ConstFactory<F>, T>;
 
     fn transaction(&mut self) -> Option<Self::Txn> {
-        Some(txn::Handle::new(self.0.borrow_mut().factory.create()))
+        Some(txn::Handle::new(ConstFactory(self.0.clone())))
     }
 
     /*
@@ -205,6 +205,13 @@ impl<F: HandlerFactory<T>, T: Transport> http::ConnectionHandler<T> for ConstFac
     */
 }
 
+impl<F: HandlerFactory<T>, T: Transport> HandlerFactory<T> for ConstFactory<F> {
+    type Output = F::Output;
+
+    fn create(&mut self, incoming: ::Result<Request>) -> ::Result<F::Output> {
+        self.0.borrow_mut().factory.create(incoming)
+    }
+}
 
 struct Conn<T, F> where T: Transport, F: HandlerFactory<T> {
     inner: http::Conn<SocketAddr, T, ConstFactory<F>>
@@ -285,13 +292,13 @@ pub trait HandlerFactory<T: Transport> {
     /// The `Handler` to use for the incoming transaction.
     type Output: Handler<T>;
     /// Creates the associated `Handler`.
-    fn create(&mut self) -> Self::Output;
+    fn create(&mut self, incoming: ::Result<Request>) -> ::Result<Self::Output>;
 }
 
 impl<F, H, T> HandlerFactory<T> for F
-where F: FnMut() -> H, H: Handler<T>, T: Transport {
+where F: FnMut(::Result<Request>) -> ::Result<H>, H: Handler<T>, T: Transport {
     type Output = H;
-    fn create(&mut self) -> H {
-        self()
+    fn create(&mut self, incoming: ::Result<Request>) -> ::Result<H> {
+        self(incoming)
     }
 }

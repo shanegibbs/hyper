@@ -5,34 +5,60 @@ use std::io;
 use http;
 use net::Transport;
 
-use super::{Handler, request, response, Request, Response};
+use super::{HandlerFactory, Handler, request, response, Request, Response};
 
 /// A `TransactionHandler` for a Server.
 ///
 /// This should be really thin glue between `http::TransactionHandler` and
 /// `server::Handler`, but largely just providing the proper types one
 /// would expect in a Server Handler.
-pub struct Handle<H: Handler<T>, T: Transport> {
-    handler: H,
+pub struct Handle<H: HandlerFactory<T>, T: Transport> {
+    handler: Either<H, H::Output>,
     _marker: PhantomData<T>
 }
 
-impl<H: Handler<T>, T: Transport> Handle<H, T> {
-    pub fn new(handler: H) -> Handle<H, T> {
+enum Either<A, B> {
+    A(A),
+    B(B)
+}
+
+impl<H: HandlerFactory<T>, T: Transport> Handle<H, T> {
+    pub fn new(factory: H) -> Handle<H, T> {
         Handle {
-            handler: handler,
+            handler: Either::A(factory),
             _marker: PhantomData,
         }
     }
 }
 
-impl<H: Handler<T>, T: Transport> http::TransactionHandler<T> for Handle<H, T> {
+impl<H: HandlerFactory<T>, T: Transport> http::TransactionHandler<T> for Handle<H, T> {
     type Transaction = http::ServerTransaction;
 
     #[inline]
     fn ready(&mut self, txn: &mut http::Transaction<T, Self::Transaction>) {
+        let mut handler = match self.handler {
+            Either::A(ref mut factory) => {
+                let incoming = txn.incoming().map(request::new);
+                match factory.create(incoming) {
+                    Ok(handler) => handler,
+                    Err(e) => {
+                        error!("HandlerFactory.create returned err = {}", e);
+                        txn.abort();
+                        return;
+                    }
+                }
+
+            },
+            Either::B(ref mut handler) => {
+                let mut outer = Transaction { inner: txn };
+                handler.ready(&mut outer);
+                return;
+            }
+        };
+
         let mut outer = Transaction { inner: txn };
-        self.handler.ready(&mut outer)
+        handler.ready(&mut outer);
+        self.handler = Either::B(handler);
     }
 }
 

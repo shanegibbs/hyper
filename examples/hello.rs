@@ -27,7 +27,7 @@ fn main() {
 
     println!("Listening on http://127.0.0.1:3000");
     Server::http(&"127.0.0.1:3000".parse().unwrap()).unwrap()
-        .handle(|| Hello).unwrap();
+        .handle(|inc: hyper::Result<_>| inc.map(|_| Hello)).unwrap();
 
     /*
     let listener = HttpListener::bind(&"127.0.0.1:3000".parse().unwrap()).unwrap();

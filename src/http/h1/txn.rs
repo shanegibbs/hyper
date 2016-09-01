@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
+use std::mem;
 use std::marker::PhantomData;
 
 use futures::Poll;
@@ -86,39 +87,32 @@ pub struct TxnIo<'a, T: 'a, X: Http1Transaction + 'a> {
 }
 
 impl<'a, T: Transport + 'a, X: Http1Transaction + 'a> TxnIo<'a, T, X> {
+    #[inline]
     pub fn incoming(&mut self) -> ::Result<http::MessageHead<X::Incoming>> {
-        unimplemented!()
+        self.heads.incoming.take().unwrap()
     }
 
+    #[inline]
     pub fn outgoing(&mut self) -> &mut http::MessageHead<X::Outgoing> {
         &mut self.heads.outgoing
     }
 
     pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let mut eof = false;
+        let eof;
         let res = match self.state.writing {
             Writing::Init | Writing::Head => {
                 trace!("Txn::write Head");
-                let mut buf = Vec::new();
-                // if the client wants to close, server cannot stop it
-                if self.state.keep_alive {
-                    // if the client wants to stay alive, then it depends
-                    // on the server to agree
-                    self.state.keep_alive = self.heads.outgoing.should_keep_alive();
-                }
-                let mut encoder = X::encode(&mut self.heads.outgoing, &mut buf);
-                encoder.prefix(WriteBuf::new(buf));
-                self.state.writing = Writing::Body(encoder);
+                write_head::<X>(&mut self.state, &mut self.heads.outgoing);
                 return self.write(data);
             },
-            Writing::Chunk(..) => unimplemented!("Writing::Chunk"),
             Writing::Body(ref mut encoder) => {
                 trace!("Txn::write body");
                 let res = encoder.encode(&mut self.io.transport, data);
                 eof = encoder.is_eof();
                 res
             },
-            Writing::KeepAlive | Writing::Closed => Ok(0),
+            Writing::Ending(..) => unimplemented!("Writing::Ending"),
+            Writing::KeepAlive | Writing::Closed => return Ok(0),
         };
 
         if eof {
@@ -133,13 +127,92 @@ impl<'a, T: Transport + 'a, X: Http1Transaction + 'a> TxnIo<'a, T, X> {
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.state.reading {
+        let eof;
+        let res = match self.state.reading {
             Reading::Init | Reading::Parse => {
-                unimplemented!()
+                unimplemented!("Reading::Parse")
             },
-            Reading::Body(..) => unimplemented!(),
-            Reading::KeepAlive | Reading::Closed => Ok(0),
+            Reading::Body(ref mut decoder) => {
+                trace!("Txn::read body buf = [{}]", buf.len());
+                let res = decoder.decode(&mut self.io, buf);
+                eof = decoder.is_eof();
+                res
+            }
+            Reading::KeepAlive | Reading::Closed => return Ok(0),
+        };
+
+        if eof {
+            trace!("Txn::read is eof");
+            self.state.reading = if self.state.keep_alive {
+                Reading::KeepAlive
+            } else {
+                Reading::Closed
+            }
         }
+        res
+    }
+
+    #[inline]
+    pub fn end(&mut self) {
+        trace!("h1::Txn::end");
+        self.end_reading();
+        self.end_writing();
+    }
+
+    fn end_reading(&mut self) {
+        self.state.reading = match self.state.reading {
+            Reading::Body(ref decoder) if decoder.is_eof() => {
+                if self.state.keep_alive {
+                    Reading::KeepAlive
+                } else {
+                    Reading::Closed
+                }
+            },
+            Reading::KeepAlive => Reading::KeepAlive,
+            _ => Reading::Closed
+        };
+    }
+
+    fn end_writing(&mut self) {
+        self.state.writing = match mem::replace(&mut self.state.writing, Writing::Closed) {
+            Writing::Init | Writing::Head => {
+                self.state.writing = Writing::Head;
+                write_head::<X>(&mut self.state, &mut self.heads.outgoing);
+                return self.end_writing();
+            },
+            Writing::Body(encoder) => {
+                if encoder.is_eof() {
+                    if self.state.keep_alive {
+                        Writing::KeepAlive
+                    } else {
+                        Writing::Closed
+                    }
+                } else if let Some(mut buf) = encoder.finish() {
+                    match write_ending(&mut buf, &mut self.io.transport) {
+                        Poll::Ok(()) => {
+                            if self.state.keep_alive {
+                                Writing::KeepAlive
+                            } else {
+                                Writing::Closed
+                            }
+                        },
+                        Poll::NotReady => Writing::Ending(buf),
+                        Poll::Err(e) => Writing::Closed,
+                    }
+                } else {
+                    Writing::Closed
+                }
+            },
+            Writing::Ending(e) => Writing::Ending(e),
+            Writing::KeepAlive => Writing::KeepAlive,
+            _ => return
+        };
+    }
+
+    #[inline]
+    pub fn abort(&mut self) {
+        self.state.reading = Reading::Closed;
+        self.state.writing = Writing::Closed;
     }
 }
 
@@ -156,6 +229,43 @@ struct State {
     writing: Writing,
 }
 
+fn write_head<X: Http1Transaction>(state: &mut State, head: &mut MessageHead<X::Outgoing>) {
+    debug_assert!(match state.writing {
+        Writing::Init | Writing::Head => true,
+        _ => false
+    }, "write_head must be called only when Writing is Init | Head, was {:?}", state.writing);
+
+    let mut buf = Vec::new();
+    // if the client wants to close, server cannot stop it
+    if state.keep_alive {
+        // if the client wants to stay alive, then it depends
+        // on the server to agree
+        state.keep_alive = head.should_keep_alive();
+    }
+    let mut encoder = X::encode(head, &mut buf);
+    encoder.prefix(WriteBuf::new(buf));
+    state.writing = Writing::Body(encoder);
+}
+
+fn write_ending<T: io::Write>(ending: &mut Ending, dst: &mut T) -> Poll<(), io::Error> {
+    loop {
+        match ending.write_to(dst) {
+            Ok(_) => {
+                if ending.is_written() {
+                    return Poll::Ok(());
+                }
+            },
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock => return Poll::NotReady,
+                _ => {
+                    error!("io error ending transaction: {}", e);
+                    return Poll::Err(e);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Reading {
     Init,
@@ -169,21 +279,10 @@ enum Reading {
 enum Writing {
     Init,
     Head,
-    Chunk(Chunk) ,
     Body(h1::Encoder),
+    Ending(Ending),
     KeepAlive,
     Closed
 }
 
-#[derive(Debug)]
-struct Chunk {
-    buf: Cow<'static, [u8]>,
-    pos: usize,
-    next: h1::Encoder,
-}
-
-impl Chunk {
-    fn is_written(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-}
+type Ending = WriteBuf<Cow<'static, [u8]>>;

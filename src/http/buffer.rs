@@ -28,6 +28,11 @@ impl Buffer {
     }
 
     #[inline]
+    pub fn is_max_size(&self) -> bool {
+        self.len() >= MAX_BUFFER_SIZE
+    }
+
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -77,39 +82,6 @@ impl Buffer {
             let new = self.vec.capacity() - cap;
             trace!("reserved {}", new);
             unsafe { grow_zerofill(&mut self.vec, new) }
-        }
-    }
-
-    pub fn wrap<'a, 'b: 'a, R: io::Read>(&'a mut self, reader: &'b mut R) -> BufReader<'a, R> {
-        BufReader {
-            buf: self,
-            reader: reader
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct BufReader<'a, R: io::Read + 'a> {
-    buf: &'a mut Buffer,
-    reader: &'a mut R
-}
-
-impl<'a, R: io::Read + 'a> BufReader<'a, R> {
-    pub fn get_ref(&self) -> &R {
-        self.reader
-    }
-}
-
-impl<'a, R: io::Read> Read for BufReader<'a, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        trace!("BufReader.read self={}, buf={}", self.buf.len(), buf.len());
-        let n = try!(self.buf.bytes().read(buf));
-        self.buf.consume(n);
-        if n == 0 {
-            self.buf.reset();
-            self.reader.read(&mut buf[n..])
-        } else {
-            Ok(n)
         }
     }
 }

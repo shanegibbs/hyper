@@ -4,14 +4,15 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
-use hyper::{Get, Post, StatusCode, RequestUri, HttpStream};
+use hyper::{Get, Post, StatusCode, HttpStream};
 use hyper::header::ContentLength;
-use hyper::server::{Server, Handler, Request, Response};
+use hyper::server::{Server, Handler, Transaction, Request};
 
 struct Echo {
     buf: Vec<u8>,
     read_pos: usize,
     write_pos: usize,
+    in_body: bool,
     eof: bool,
     route: Route,
 }
@@ -52,6 +53,7 @@ impl Echo {
             read_pos: 0,
             write_pos: 0,
             eof: false,
+            in_body: false,
             route: route,
         }
     }
@@ -85,12 +87,20 @@ impl Handler<HttpStream> for Echo {
                                 _ => ()
                             }
                         }
-                        Ok(None) => Next::read_and_write(),
+                        Ok(None) => (),
                         Err(e) => {
                             println!("read error {:?}", e);
                             txn.end();
                         }
                     }
+                }
+
+                if !self.in_body {
+                    match *body {
+                        Body::Len(len) => txn.response().headers_mut().set(ContentLength(len)),
+                        _ => ()
+                    }
+                    self.in_body = true;
                 }
 
                 if self.write_pos < self.read_pos {
@@ -117,7 +127,8 @@ impl Handler<HttpStream> for Echo {
 fn main() {
     pretty_env_logger::init();
     let server = Server::http(&"127.0.0.1:1337".parse().unwrap()).unwrap();
-    let (listening, server) = server.handle(|inc| inc.map(Echo::new)).unwrap();
-    println!("Listening on http://{}", listening);
-    server.run();
+    println!("Listening on http://127.0.0.1:1337");
+    let _ /*(listening, server)*/ = server.handle(|inc: hyper::Result<_>| inc.map(Echo::new)).unwrap();
+    //println!("Listening on http://{}", listening);
+    //server.run();
 }

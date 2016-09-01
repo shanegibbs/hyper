@@ -361,7 +361,15 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
                     let (version, head) = match self.parse() {
                         Ok(Some(head)) => (head.version, Ok(head)),
                         Ok(None) => return Poll::NotReady,
-                        Err(e) => (HttpVersion::Http10, Err(e))
+                        Err(e) => {
+                            if !self.io.buf.is_empty() {
+                                (HttpVersion::Http10, Err(e))
+                            } else {
+                                trace!("parse error with 0 input, err = {:?}", e);
+                                self.state = State::Closed;
+                                return Poll::Ok(());
+                            }
+                        }
                     };
 
                     match version {

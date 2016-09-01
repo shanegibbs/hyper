@@ -11,7 +11,7 @@ use header::Headers;
 use http::{RequestHead, MessageHead, RequestLine};
 use uri::RequestUri;
 
-pub fn new<T>(incoming: RequestHead) -> Request {
+pub fn new(incoming: RequestHead) -> Request {
     let MessageHead { version, subject: RequestLine(method, uri), headers } = incoming;
     debug!("Request Line: {:?} {:?} {:?}", method, uri, version);
     debug!("{:#?}", headers);

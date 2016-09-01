@@ -53,7 +53,9 @@ impl<'a, T: Transport + 'a, X: Http1Transaction + 'a> Transaction<'a, T, X> {
     }
 
     pub fn incoming(&mut self) -> ::Result<MessageHead<X::Incoming>> {
-        unimplemented!("Txn.incoming")
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.incoming(),
+        }
     }
 
     #[inline]
@@ -89,168 +91,15 @@ impl<'a, T: Transport + 'a, X: Http1Transaction + 'a> Transaction<'a, T, X> {
 
     #[inline]
     pub fn end(&mut self) {
-        unimplemented!("Txn.end")
-    }
-}
-
-/// Wraps a `Transport` to provide HTTP decoding when reading.
-#[derive(Debug)]
-pub struct Decoder<'a, T: Read + 'a>(DecoderImpl<'a, T>);
-
-/// Wraps a `Transport` to provide HTTP encoding when writing.
-#[derive(Debug)]
-pub struct Encoder<'a, T: Transport + 'a>(EncoderImpl<'a, T>);
-
-#[derive(Debug)]
-enum DecoderImpl<'a, T: Read + 'a> {
-    H1(&'a mut h1::Decoder, Trans<'a, T>),
-}
-
-#[derive(Debug)]
-enum Trans<'a, T: Read + 'a> {
-    Port(&'a mut T),
-    Buf(self::buffer::BufReader<'a, T>)
-}
-
-impl<'a, T: Read + 'a> Trans<'a, T> {
-    fn get_ref(&self) -> &T {
-        match *self {
-            Trans::Port(ref t) => &*t,
-            Trans::Buf(ref buf) => buf.get_ref()
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.end(),
         }
-    }
-}
-
-impl<'a, T: Read + 'a> Read for Trans<'a, T> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match *self {
-            Trans::Port(ref mut t) => t.read(buf),
-            Trans::Buf(ref mut b) => b.read(buf)
-        }
-    }
-}
-
-#[derive(Debug)]
-enum EncoderImpl<'a, T: Transport + 'a> {
-    H1(&'a mut h1::Encoder, &'a mut T),
-}
-
-impl<'a, T: Read> Decoder<'a, T> {
-    fn h1(decoder: &'a mut h1::Decoder, transport: Trans<'a, T>) -> Decoder<'a, T> {
-        Decoder(DecoderImpl::H1(decoder, transport))
-    }
-
-    /// Read from the `Transport`.
-    #[inline]
-    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.0 {
-            DecoderImpl::H1(ref mut decoder, ref mut transport) => {
-                decoder.decode(transport, buf)
-            }
-        }
-    }
-
-    /// Try to read from the `Transport`.
-    ///
-    /// This method looks for the `WouldBlock` error. If the read did not block,
-    /// a return value would be `Ok(Some(x))`. If the read would block,
-    /// this method would return `Ok(None)`.
-    #[inline]
-    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        match self.read(buf) {
-            Ok(n) => Ok(Some(n)),
-            Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(e)
-            }
-        }
-    }
-
-    /// Get a reference to the transport.
-    pub fn get_ref(&self) -> &T {
-        match self.0 {
-            DecoderImpl::H1(_, ref transport) => transport.get_ref()
-        }
-    }
-}
-
-impl<'a, T: Transport> Encoder<'a, T> {
-    fn h1(encoder: &'a mut h1::Encoder, transport: &'a mut T) -> Encoder<'a, T> {
-        Encoder(EncoderImpl::H1(encoder, transport))
-    }
-
-    /// Write to the `Transport`.
-    #[inline]
-    pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        if data.is_empty() {
-            return Ok(0);
-        }
-        match self.0 {
-            EncoderImpl::H1(ref mut encoder, ref mut transport) => {
-                if encoder.is_closed() {
-                    Ok(0)
-                } else {
-                    encoder.encode(*transport, data)
-                }
-            }
-        }
-    }
-
-    /// Try to write to the `Transport`.
-    ///
-    /// This method looks for the `WouldBlock` error. If the write did not block,
-    /// a return value would be `Ok(Some(x))`. If the write would block,
-    /// this method would return `Ok(None)`.
-    #[inline]
-    pub fn try_write(&mut self, data: &[u8]) -> io::Result<Option<usize>> {
-        match self.write(data) {
-            Ok(n) => Ok(Some(n)),
-            Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(e)
-            }
-        }
-    }
-
-    /// Closes an encoder, signaling that no more writing will occur.
-    ///
-    /// This is needed for encodings that don't know the length of the content
-    /// beforehand. Most common instance would be usage of
-    /// `Transfer-Enciding: chunked`. You would call `close()` to signal
-    /// the `Encoder` should write the end chunk, or `0\r\n\r\n`.
-    pub fn close(&mut self) {
-        match self.0 {
-            EncoderImpl::H1(ref mut encoder, _) => encoder.close()
-        }
-    }
-
-    /// Get a reference to the transport.
-    pub fn get_ref(&self) -> &T {
-        match self.0 {
-            EncoderImpl::H1(_, ref transport) => &*transport
-        }
-    }
-}
-
-impl<'a, T: Read> Read for Decoder<'a, T> {
-    #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read(buf)
-    }
-}
-
-impl<'a, T: Transport> Write for Encoder<'a, T> {
-    #[inline]
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.write(data)
     }
 
     #[inline]
-    fn flush(&mut self) -> io::Result<()> {
-        match self.0 {
-            EncoderImpl::H1(_, ref mut transport) => {
-                transport.flush()
-            }
+    pub fn abort(&mut self) {
+        match self.inner {
+            TransactionImpl::H1(ref mut txn) => txn.abort(),
         }
     }
 }
@@ -274,6 +123,17 @@ impl<T: AsRef<[u8]>> WriteBuf<T> {
             bytes: bytes,
             pos: 0,
         }
+    }
+
+    pub fn is_written(&self) -> bool {
+        self.pos >= self.bytes.as_ref().len()
+    }
+
+    pub fn write_to<W: Write>(&mut self, dst: &mut W) -> io::Result<usize> {
+        dst.write(&self.bytes.as_ref()[self.pos..]).map(|n| {
+            self.pos += n;
+            n
+        })
     }
 }
 
@@ -317,7 +177,19 @@ impl<T> fmt::Debug for Io<T> {
     }
 }
 
-const MAX_BUFFER_SIZE: usize = 8192 + 4096 * 100;
+impl<T: Read> Read for Io<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        trace!("Io.read self={}, buf={}", self.buf.len(), buf.len());
+        let n = try!(self.buf.bytes().read(buf));
+        self.buf.consume(n);
+        if n == 0 {
+            self.buf.reset();
+            self.transport.read(&mut buf[n..])
+        } else {
+            Ok(n)
+        }
+    }
+}
 
 impl<T: Transport> Io<T> {
     fn parse<S: Http1Transaction>(&mut self) -> ::Result<Option<MessageHead<S::Incoming>>> {
@@ -339,7 +211,7 @@ impl<T: Transport> Io<T> {
                 Ok(Some(head))
             },
             None => {
-                if self.buf.len() >= MAX_BUFFER_SIZE {
+                if self.buf.is_max_size() {
                     debug!("MAX_BUFFER_SIZE reached, closing");
                     Err(::Error::TooLarge)
                 } else {
