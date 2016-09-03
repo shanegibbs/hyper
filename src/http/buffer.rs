@@ -52,6 +52,17 @@ impl Buffer {
         }
     }
 
+    pub fn consume_leading_lines(&mut self) {
+        while !self.is_empty() {
+            match self.vec[self.write_pos] {
+                b'\r' | b'\n' => {
+                    self.consume(1);
+                },
+                _ => return
+            }
+        }
+    }
+
     pub fn read_from<R: Read>(&mut self, r: &mut R) -> io::Result<usize> {
         self.maybe_reserve();
         let n = try!(r.read(&mut self.vec[self.read_pos..]));

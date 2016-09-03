@@ -362,7 +362,9 @@ impl<K: Key, T: Transport, H: ConnectionHandler<T>> Conn<K, T, H> {
                         Ok(Some(head)) => (head.version, Ok(head)),
                         Ok(None) => return Poll::NotReady,
                         Err(e) => {
+                            self.io.buf.consume_leading_lines();
                             if !self.io.buf.is_empty() {
+                                trace!("parse error ({}) with bytes: {:?}", e, self.io.buf.bytes());
                                 (HttpVersion::Http10, Err(e))
                             } else {
                                 trace!("parse error with 0 input, err = {:?}", e);

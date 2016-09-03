@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,7 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{Future, Poll};
-use futures::stream::Stream;
+use futures::stream::{Stream, MergedItem};
+use tokio::{Loop, Sender};
 
 pub use self::request::Request;
 pub use self::response::Response;
@@ -31,18 +33,6 @@ use net::{SslServer, Transport};
 mod request;
 mod response;
 mod txn;
-
-/// A configured `Server` ready to run.
-pub struct ServerLoop<A, H> where A: Accept, H: HandlerFactory<A::Output> {
-    inner: ::std::marker::PhantomData<(A, H)>
-    //inner: Option<(rotor::Loop<ServerFsm<A, H>>, Context<H>)>,
-}
-
-impl<A: Accept, H: HandlerFactory<A::Output>> fmt::Debug for ServerLoop<A, H> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.pad("ServerLoop")
-    }
-}
 
 /// A Server that can accept incoming network requests.
 #[derive(Debug)]
@@ -119,11 +109,12 @@ impl<S: SslServer> Server<HttpsListener<S>> {
 
 impl/*<A: Accept>*/ Server<HttpListener> {
     /// Binds to a socket and starts handling connections.
-    pub fn handle<H>(mut self, factory: H) -> ::Result<(Listening, ServerLoop<HttpListener, H>)>
+    pub fn handle<H>(mut self, factory: H) -> ::Result<(Listening, ServerLoop<H>)>
     where H: HandlerFactory<HttpStream/*A::Output*/> + Send + 'static {
         use std::rc::Rc;
         use std::cell::RefCell;
-        use tokio::{Loop, TcpListener};
+        use tokio::{TcpListener};
+        trace!("handle server = {:?}", self);
 
         let mut reactor = try!(Loop::new());
 
@@ -131,36 +122,75 @@ impl/*<A: Accept>*/ Server<HttpListener> {
         let addr = try!(listener.local_addr());
         let handle = reactor.handle();
 
+        debug!("adding Listener({})", addr);
+
         let listener = TcpListener::from_listener(listener, &addr, handle);
         let keep_alive = self.keep_alive;
         let idle_timeout = self.idle_timeout;
 
 
         let pin = reactor.pin();
-        let work = listener.and_then(move |listener| {
+        let (shutdown_tx, shutdown_rx) = pin.handle().clone().channel();
+        let work = shutdown_rx.join(listener).and_then(move |(shutdown_rx, listener)| {
 
             let factory = Rc::new(RefCell::new(Context {
                 factory: factory,
                 idle_timeout: idle_timeout,
                 keep_alive: keep_alive
             }));
-            listener.incoming().for_each(move |(sock, addr)| {
-                let socket = HttpStream(sock);
-                let conn = http::Conn::new(addr, socket, ConstFactory(factory.clone()));
-                pin.add_loop_data(Conn {
-                    inner: conn,
-                }).forget();
-                Ok(())
+            listener.incoming().merge(shutdown_rx).for_each(move |merged| {
+                match merged {
+                    MergedItem::First((sock, addr)) => {
+                        let socket = HttpStream(sock);
+                        let conn = http::Conn::new(addr, socket, ConstFactory(factory.clone()));
+                        pin.add_loop_data(Conn {
+                            inner: conn,
+                        }).forget();
+                        Ok(())
+                    },
+                    _ => {
+                        // Second or Both means shutdown was received
+                        debug!("ServerLoop shutdown received");
+                        Err(io::Error::new(io::ErrorKind::Other, "shutdown"))
+                    }
+                }
             })
-        });
+        }).map_err(|_| ());
 
-        reactor.run(work);
-        unimplemented!()
+        Ok((
+            Listening {
+                addrs: vec![addr],
+                shutdown: shutdown_tx,
+            },
+            ServerLoop {
+                inner: Some((reactor, Box::new(work))),
+                _marker: PhantomData,
+            }
+        ))
+        //reactor.run(work);
     }
 }
 
+/// A configured `Server` ready to run.
+pub struct ServerLoop<H> {
+    inner: Option<(Loop, Box<Future<Item=(), Error=()>>)>,
+    _marker: PhantomData<H>
+}
 
-impl<A: Accept, H: HandlerFactory<A::Output>> ServerLoop<A, H> {
+impl<H> fmt::Debug for ServerLoop<H> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("ServerLoop")
+    }
+}
+
+// If the Handler is Send, we can assume the whole thing is Send.
+//
+// It's not by default, because the ServerLoop holds on to an Rc,
+// which makes it not Send. However, this is safe since we never gave
+// any copies away, and we move the Loop and the Future together.
+unsafe impl<H: Send> Send for ServerLoop<H> {}
+
+impl<H> ServerLoop<H> {
     /// Runs the server forever in this loop.
     ///
     /// This will block the current thread.
@@ -169,13 +199,11 @@ impl<A: Accept, H: HandlerFactory<A::Output>> ServerLoop<A, H> {
     }
 }
 
-impl<A: Accept, H: HandlerFactory<A::Output>> Drop for ServerLoop<A, H> {
+impl<H> Drop for ServerLoop<H> {
     fn drop(&mut self) {
-        /*
-        self.inner.take().map(|(loop_, ctx)| {
-            let _ = loop_.run(ctx);
+        self.inner.take().map(|(mut loop_, work)| {
+            let _ = loop_.run(work);
         });
-        */
     }
 }
 
@@ -230,14 +258,13 @@ where T: Transport,
 /// A handle of the running server.
 pub struct Listening {
     addrs: Vec<SocketAddr>,
-    shutdown: (Arc<AtomicBool>, /*rotor::Notifier*/),
+    shutdown: Sender<()>,
 }
 
 impl fmt::Debug for Listening {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Listening")
             .field("addrs", &self.addrs)
-            .field("closed", &self.shutdown.0.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -263,8 +290,7 @@ impl Listening {
     /// Stop the server from listening to its socket address.
     pub fn close(self) {
         debug!("closing server {}", self);
-        self.shutdown.0.store(true, Ordering::Release);
-        //self.shutdown.1.wakeup().unwrap();
+        let _ = self.shutdown.send(());
     }
 }
 
